@@ -859,6 +859,19 @@ body {
   padding: 16px 14px;
 }
 
+.eq-graph {
+  background: var(--surface);
+  border-radius: var(--radius-sm);
+  margin-bottom: 4px;
+  overflow: hidden;
+  padding: 6px;
+}
+
+.eq-graph canvas {
+  cursor: crosshair;
+  display: block;
+}
+
 .fx-window-body .slider-row label { width: 72px; }
 
 .fx-window-body .val {

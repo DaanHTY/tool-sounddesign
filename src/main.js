@@ -119,6 +119,86 @@
   let analyser = null;
   let freqData = null;
 
+  // True granular pitch-shifter as an AudioWorklet. A circular buffer is read
+  // out at two overlapping positions advancing at the transposition ratio,
+  // each Hann-windowed and crossfaded, so the result is genuinely transposed
+  // (not the FM-ish artifact a swept DelayNode produces). Registered once per
+  // context from a Blob URL so the whole effect stays inside this file.
+  const PITCH_WORKLET_SRC = `
+    class PitchShifter extends AudioWorkletProcessor {
+      static get parameterDescriptors() {
+        return [{ name: 'ratio', defaultValue: 1, minValue: 0.25, maxValue: 4,
+                  automationRate: 'k-rate' }];
+      }
+      constructor() {
+        super();
+        this.size = 8192;                  // circular buffer (~170ms @48k)
+        this.buf = new Float32Array(this.size);
+        this.writePos = 0;
+        this.grainSize = 2048;
+        // two grains offset by half a grain so their Hann windows overlap
+        this.read = [-this.grainSize, -this.grainSize / 2];
+        this.phase = [0, this.grainSize / 2];
+      }
+      process(inputs, outputs, params) {
+        const input = inputs[0];
+        const output = outputs[0];
+        if (!output || !output.length) return true;
+        const inCh = input && input.length ? input[0] : null;
+        const n = output[0].length;
+        const ratio = params.ratio[0];
+        const gs = this.grainSize;
+        const size = this.size;
+        const buf = this.buf;
+
+        for (let i = 0; i < n; i++) {
+          buf[this.writePos] = inCh ? inCh[i] : 0;
+
+          let out = 0;
+          for (let g = 0; g < 2; g++) {
+            const ph = this.phase[g];
+            // Hann window over the grain (sums to ~1 with the half-offset twin)
+            const w = 0.5 - 0.5 * Math.cos((2 * Math.PI * ph) / gs);
+            // linear-interpolated read at the (fractional) grain pointer
+            const pos = this.read[g];
+            const i0 = Math.floor(pos);
+            const frac = pos - i0;
+            const a = buf[((i0 % size) + size) % size];
+            const b = buf[(((i0 + 1) % size) + size) % size];
+            out += (a + (b - a) * frac) * w;
+
+            // advance the grain read pointer at the transposition ratio
+            this.read[g] += ratio;
+            let np = ph + 1;
+            if (np >= gs) {
+              np = 0;
+              // re-anchor a grain length behind the write head each cycle
+              this.read[g] = this.writePos - gs;
+            }
+            this.phase[g] = np;
+          }
+
+          // 0.5 keeps two overlapping Hann grains near unity gain
+          for (let ch = 0; ch < output.length; ch++) output[ch][i] = out * 0.5;
+
+          this.writePos = (this.writePos + 1) % size;
+        }
+        return true;
+      }
+    }
+    registerProcessor('pitch-shifter', PitchShifter);
+  `;
+
+  let pitchWorkletReady = false;
+  function registerPitchWorklet() {
+    if (!ctx || !ctx.audioWorklet) return Promise.resolve(false);
+    const blob = new Blob([PITCH_WORKLET_SRC], { type: 'application/javascript' });
+    const url = URL.createObjectURL(blob);
+    return ctx.audioWorklet.addModule(url)
+      .then(() => { pitchWorkletReady = true; URL.revokeObjectURL(url); return true; })
+      .catch(() => { URL.revokeObjectURL(url); return false; });
+  }
+
   function makeNoiseBuffer(seconds) {
     const len = Math.floor(ctx.sampleRate * seconds);
     const buffer = ctx.createBuffer(1, len, ctx.sampleRate);
@@ -160,6 +240,191 @@
     return curve;
   }
 
+  // ---- EQ visualization -----------------------------------------------------
+  //
+  // Interactive frequency-response graph for the EQ effect: a log-frequency
+  // curve (the summed magnitude of the three bands) with three draggable
+  // handles — drag horizontally to move a band's frequency (mid only), drag
+  // vertically to set its gain. Mirrors values back to inst.params + sliders.
+
+  // Analog biquad magnitude responses (dB) so the drawn curve matches the
+  // BiquadFilterNodes in the EQ build(). w = 2π f / fs.
+  function biquadShelfDb(type, f, f0, gainDb, fs) {
+    // Low/high shelf magnitude approximation via the RBJ cookbook coefficients.
+    const A = Math.pow(10, gainDb / 40);
+    const w0 = 2 * Math.PI * f0 / fs;
+    const cw = Math.cos(w0), sw = Math.sin(w0);
+    const S = 1; // shelf slope
+    const alpha = sw / 2 * Math.sqrt((A + 1 / A) * (1 / S - 1) + 2);
+    const tsa = 2 * Math.sqrt(A) * alpha;
+    let b0, b1, b2, a0, a1, a2;
+    if (type === 'low') {
+      b0 = A * ((A + 1) - (A - 1) * cw + tsa);
+      b1 = 2 * A * ((A - 1) - (A + 1) * cw);
+      b2 = A * ((A + 1) - (A - 1) * cw - tsa);
+      a0 = (A + 1) + (A - 1) * cw + tsa;
+      a1 = -2 * ((A - 1) + (A + 1) * cw);
+      a2 = (A + 1) + (A - 1) * cw - tsa;
+    } else {
+      b0 = A * ((A + 1) + (A - 1) * cw + tsa);
+      b1 = -2 * A * ((A - 1) + (A + 1) * cw);
+      b2 = A * ((A + 1) + (A - 1) * cw - tsa);
+      a0 = (A + 1) - (A - 1) * cw + tsa;
+      a1 = 2 * ((A - 1) - (A + 1) * cw);
+      a2 = (A + 1) - (A - 1) * cw - tsa;
+    }
+    return biquadMagDb(b0, b1, b2, a0, a1, a2, f, fs);
+  }
+
+  function biquadPeakDb(f, f0, gainDb, Q, fs) {
+    const A = Math.pow(10, gainDb / 40);
+    const w0 = 2 * Math.PI * f0 / fs;
+    const cw = Math.cos(w0), sw = Math.sin(w0);
+    const alpha = sw / (2 * Q);
+    const b0 = 1 + alpha * A;
+    const b1 = -2 * cw;
+    const b2 = 1 - alpha * A;
+    const a0 = 1 + alpha / A;
+    const a1 = -2 * cw;
+    const a2 = 1 - alpha / A;
+    return biquadMagDb(b0, b1, b2, a0, a1, a2, f, fs);
+  }
+
+  function biquadMagDb(b0, b1, b2, a0, a1, a2, f, fs) {
+    const w = 2 * Math.PI * f / fs;
+    const cw = Math.cos(w), sw = Math.sin(w), c2 = Math.cos(2 * w), s2 = Math.sin(2 * w);
+    const numRe = b0 + b1 * cw + b2 * c2;
+    const numIm = -(b1 * sw + b2 * s2);
+    const denRe = a0 + a1 * cw + a2 * c2;
+    const denIm = -(a1 * sw + a2 * s2);
+    const num = Math.hypot(numRe, numIm);
+    const den = Math.hypot(denRe, denIm) || 1e-9;
+    return 20 * Math.log10(num / den);
+  }
+
+  function eqVisual(body, inst, which, syncSliders) {
+    const fs = (ctx && ctx.sampleRate) || 48000;
+    const def = FX_DEFS.eq;
+    const W = 252, H = 132;
+    const DB = 18;                         // vertical range ±dB
+    const FMIN = 20, FMAX = 20000;
+    const logMin = Math.log10(FMIN), logMax = Math.log10(FMAX);
+
+    const wrap = document.createElement('div');
+    wrap.className = 'eq-graph';
+    const canvas = document.createElement('canvas');
+    canvas.width = W * 2; canvas.height = H * 2;          // retina
+    canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+    wrap.appendChild(canvas);
+    body.insertBefore(wrap, body.firstChild);
+
+    const xForF = (f) => ((Math.log10(f) - logMin) / (logMax - logMin)) * W;
+    const fForX = (x) => Math.pow(10, logMin + (x / W) * (logMax - logMin));
+    const yForDb = (db) => H / 2 - (db / DB) * (H / 2);
+    const dbForY = (y) => -((y - H / 2) / (H / 2)) * DB;
+
+    // The three draggable bands. Low/high shelves have fixed frequency.
+    const bands = [
+      { key: 'low',  freq: () => def.lowFreq,  movableF: false, gainK: 'low' },
+      { key: 'mid',  freq: () => inst.params.midFreq, movableF: true, gainK: 'mid', fK: 'midFreq', fMin: 200, fMax: 8000 },
+      { key: 'high', freq: () => def.highFreq, movableF: false, gainK: 'high' },
+    ];
+
+    function totalDb(f) {
+      return biquadShelfDb('low', f, def.lowFreq, inst.params.low, fs)
+        + biquadPeakDb(f, inst.params.midFreq, inst.params.mid, 1, fs)
+        + biquadShelfDb('high', f, def.highFreq, inst.params.high, fs);
+    }
+
+    function draw() {
+      const g = canvas.getContext('2d');
+      g.setTransform(2, 0, 0, 2, 0, 0);
+      g.clearRect(0, 0, W, H);
+
+      // grid: 0 dB line + decade verticals
+      g.strokeStyle = 'rgba(255,255,255,0.18)';
+      g.lineWidth = 1;
+      g.beginPath(); g.moveTo(0, H / 2); g.lineTo(W, H / 2); g.stroke();
+      g.strokeStyle = 'rgba(255,255,255,0.07)';
+      [100, 1000, 10000].forEach((f) => {
+        const x = xForF(f);
+        g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H); g.stroke();
+      });
+
+      // response curve
+      g.beginPath();
+      for (let px = 0; px <= W; px++) {
+        const f = fForX(px);
+        const y = yForDb(Math.max(-DB, Math.min(DB, totalDb(f))));
+        if (px === 0) g.moveTo(px, y); else g.lineTo(px, y);
+      }
+      g.strokeStyle = '#c5a8ff';
+      g.lineWidth = 1.6;
+      g.stroke();
+      // soft fill under the curve
+      g.lineTo(W, H / 2); g.lineTo(0, H / 2); g.closePath();
+      g.fillStyle = 'rgba(197,168,255,0.10)';
+      g.fill();
+
+      // band handles
+      bands.forEach((b) => {
+        const x = xForF(b.freq());
+        const y = yForDb(Math.max(-DB, Math.min(DB, inst.params[b.gainK])));
+        g.beginPath(); g.arc(x, y, 5, 0, Math.PI * 2);
+        g.fillStyle = '#ffffff'; g.fill();
+        g.fillStyle = 'rgba(255,255,255,0.55)';
+        g.font = "8px 'Suisse Intl Mono', monospace";
+        g.fillText(b.key.toUpperCase(), x - 7, y - 8);
+      });
+    }
+
+    // pointer dragging on the canvas
+    let activeBand = null;
+    const localXY = (e) => {
+      const r = canvas.getBoundingClientRect();
+      return { x: e.clientX - r.left, y: e.clientY - r.top };
+    };
+    function pickBand(x, y) {
+      let best = null, bestD = 18;
+      bands.forEach((b) => {
+        const bx = xForF(b.freq());
+        const by = yForDb(Math.max(-DB, Math.min(DB, inst.params[b.gainK])));
+        const d = Math.hypot(bx - x, by - y);
+        if (d < bestD) { bestD = d; best = b; }
+      });
+      return best;
+    }
+    canvas.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      const { x, y } = localXY(e);
+      activeBand = pickBand(x, y) || bands[1];   // default grab = mid
+      onDrag(e);
+      window.addEventListener('mousemove', onDrag);
+      window.addEventListener('mouseup', onUp);
+    });
+    function onDrag(e) {
+      if (!activeBand) return;
+      const { x, y } = localXY(e);
+      inst.params[activeBand.gainK] = Math.round(Math.max(-DB, Math.min(DB, dbForY(y))) * 2) / 2;
+      if (activeBand.movableF) {
+        const f = Math.max(activeBand.fMin, Math.min(activeBand.fMax, fForX(Math.max(0, Math.min(W, x)))));
+        inst.params[activeBand.fK] = Math.round(f / 50) * 50;
+      }
+      rackParamChanged(which);
+      syncSliders();
+      draw();
+    }
+    function onUp() {
+      activeBand = null;
+      window.removeEventListener('mousemove', onDrag);
+      window.removeEventListener('mouseup', onUp);
+    }
+
+    // keep the graph live if sliders move it
+    body.parentElement._syncVisual = draw;
+    draw();
+  }
+
   // ---- Modular FX definitions ----------------------------------------------
   //
   // Each effect type exposes:
@@ -167,6 +432,7 @@
   //   params   — [{ k, label, min, max, step, def, fmt }]
   //   build(p) — returns { input, output, apply(p) } for an instance, building
   //              its Web Audio subgraph. apply() retunes from a params object.
+  //   visual   — optional (body, inst, which, syncSliders) interactive UI.
   // Effects are chained in order; each instance's output feeds the next input.
 
   const FX_DEFS = {
@@ -293,6 +559,10 @@
         }
         return { input, output, apply };
       },
+      // Fixed corner frequencies of the shelves (matched to build()).
+      lowFreq: 250,
+      highFreq: 4000,
+      visual: eqVisual,
     },
 
     distortion: {
@@ -335,67 +605,44 @@
       params: [
         { k: 'semitones', label: 'Pitch', min: -24, max: 24, step: 1, def: -12,
           fmt: (n) => (n > 0 ? '+' : '') + n + 'st' },
-        { k: 'window', label: 'Window', min: 30, max: 200, step: 5, def: 80, fmt: (n) => n + 'ms' },
         { k: 'mix',    label: 'Mix',    min: 0, max: 100, step: 1, def: 100, fmt: pct },
       ],
-      // Granular delay-line pitch shifter: two overlapping windows whose delay
-      // times ramp continuously, transposing without changing duration.
+      // Genuine transposition via the granular pitch-shift AudioWorklet. Falls
+      // back to dry until the worklet module finishes registering.
       build() {
         const input = ctx.createGain();
         const output = ctx.createGain();
         const dry = ctx.createGain();
         const wet = ctx.createGain();
-        const grains = [0, 1].map(() => {
-          const d = ctx.createDelay(1);
-          const g = ctx.createGain();
-          input.connect(d); d.connect(g); g.connect(wet);
-          return { d, g };
-        });
-        wet.connect(output);
         input.connect(dry); dry.connect(output);
-        let lfoTimer = null;
-        // schedule the sawtooth delay ramps + triangular crossfade in JS
-        function schedule(p) {
-          if (lfoTimer) { clearInterval(lfoTimer); lfoTimer = null; }
-          const ratio = Math.pow(2, p.semitones / 12);
-          const win = p.window / 1000;                 // window length (s)
-          const rate = Math.abs(1 - ratio) / win;      // sweeps per second
-          if (rate < 0.0001) {                         // unity → straight through
-            grains.forEach((gr, i) => {
-              gr.d.delayTime.value = 0.001;
-              gr.g.gain.value = i === 0 ? 1 : 0;
+
+        let node = null;
+        if (pitchWorkletReady) {
+          try {
+            node = new AudioWorkletNode(ctx, 'pitch-shifter', {
+              channelCount: 2, channelCountMode: 'explicit',
             });
-            return;
-          }
-          const period = 1 / rate;                     // seconds per grain sweep
-          const tick = Math.max(period / 8, 0.02);
-          let phase = 0;
-          const step = () => {
-            if (!ctx) return;
-            const t = ctx.currentTime;
-            grains.forEach((gr, i) => {
-              const ph = (phase + i * 0.5) % 1;
-              // delay sweeps 0→win (down-shift) or win→0 (up-shift)
-              const dt = ratio < 1 ? ph * win : (1 - ph) * win;
-              gr.d.delayTime.setTargetAtTime(Math.max(dt, 0.0005), t, tick * 0.4);
-              // triangular window fades grains in/out at the wrap seams
-              const env = 1 - Math.abs(ph - 0.5) * 2;
-              gr.g.gain.setTargetAtTime(env, t, tick * 0.4);
-            });
-            phase = (phase + tick * rate) % 1;
-          };
-          step();
-          lfoTimer = setInterval(step, tick * 1000);
+            input.connect(node); node.connect(wet); wet.connect(output);
+          } catch (e) { node = null; }
         }
+        // Without the worklet, route input straight to wet so the effect is
+        // transparent rather than silent.
+        if (!node) { input.connect(wet); wet.connect(output); }
+
         function apply(p) {
           const t = ctx.currentTime;
-          schedule(p);
+          // At 0 st (or no worklet) pass dry through cleanly — the granular
+          // engine would otherwise add slight warble at unity.
+          const bypass = !node || p.semitones === 0;
+          if (node) {
+            const ratio = Math.pow(2, p.semitones / 12);
+            node.parameters.get('ratio').setTargetAtTime(ratio, t, 0.02);
+          }
           const m = p.mix / 100;
-          wet.gain.setTargetAtTime(m, t, 0.02);
-          dry.gain.setTargetAtTime(1 - m, t, 0.02);
+          wet.gain.setTargetAtTime(bypass ? 0 : m, t, 0.02);
+          dry.gain.setTargetAtTime(bypass ? 1 : 1 - m, t, 0.02);
         }
-        function dispose() { if (lfoTimer) clearInterval(lfoTimer); }
-        return { input, output, apply, dispose };
+        return { input, output, apply };
       },
     },
   };
@@ -449,6 +696,7 @@
     if (ctx) return;
     ctx = new (window.AudioContext || window.webkitAudioContext)();
     noiseBuf = makeNoiseBuffer(2);
+    registerPitchWorklet();   // async; pitch effect falls back to dry until ready
 
     // chord buses
     resoBus = ctx.createGain();
@@ -1963,6 +2211,8 @@
     const body = document.createElement('div');
     body.className = 'fx-window-body';
 
+    // Build the sliders; keep per-key refs so a custom visual can sync them.
+    const sliderRefs = {};
     def.params.forEach((pr) => {
       const rowEl = document.createElement('div');
       rowEl.className = 'slider-row';
@@ -1976,16 +2226,19 @@
       val.className = 'val';
       const fmt = pr.fmt || String;
       val.textContent = fmt(inst.params[pr.k]);
+      const refresh = () => { input.value = inst.params[pr.k]; val.textContent = fmt(inst.params[pr.k]); };
       input.addEventListener('input', () => {
         const num = parseFloat(input.value);
         inst.params[pr.k] = num;
         val.textContent = fmt(num);
         rackParamChanged(which);
+        if (win._syncVisual) win._syncVisual();
       });
       rowEl.appendChild(label);
       rowEl.appendChild(input);
       rowEl.appendChild(val);
       body.appendChild(rowEl);
+      sliderRefs[pr.k] = refresh;
     });
 
     win.appendChild(head);
@@ -1994,6 +2247,14 @@
     fxWindows[key] = win;
     bringToFront(win);
     makeDraggable(win, head);
+
+    // Optional interactive visualization (e.g. EQ response curve). It prepends
+    // its own UI above the sliders and edits inst.params directly; syncSliders
+    // refreshes the slider rows to match after a drag.
+    if (def.visual) {
+      const syncSliders = () => Object.values(sliderRefs).forEach((fn) => fn());
+      def.visual(body, inst, which, syncSliders);
+    }
   }
 
   // Close every open settings window belonging to one rack (used when its
