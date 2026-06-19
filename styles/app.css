@@ -146,6 +146,16 @@ body {
   gap: var(--tool-control-gap);
 }
 
+.voice-hint {
+  color: var(--text-subtle);
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  letter-spacing: -0.02em;
+  line-height: 1.5;
+  margin: 0;
+  text-transform: uppercase;
+}
+
 .chip {
   background: var(--surface);
   border: 0;
@@ -338,7 +348,9 @@ body {
   background: var(--island-bg);
   border-radius: var(--radius);
   clip-path: inset(0 round var(--radius));
+  display: flex;
   flex: 1 1 auto;
+  flex-direction: column;
   min-height: 0;
   overflow: hidden;
   position: relative;
@@ -346,7 +358,100 @@ body {
 
 #roll {
   cursor: crosshair;
+  flex: 1 1 auto;
+  min-height: 0;
 }
+
+/* ---- Board tabs ----------------------------------------------------------- */
+
+.board-tabs {
+  align-items: stretch;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  flex-shrink: 0;
+  gap: 2px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 6px 6px 0;
+  scrollbar-width: none;
+}
+
+.board-tabs::-webkit-scrollbar { display: none; }
+
+.board-tab {
+  align-items: center;
+  background: var(--surface);
+  border: 0;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: inline-flex;
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  gap: 6px;
+  letter-spacing: -0.02em;
+  min-height: 30px;
+  padding: 4px 8px 4px 12px;
+  text-transform: uppercase;
+  transition: background 0.15s ease, color 0.15s ease;
+  white-space: nowrap;
+}
+
+.board-tab:hover {
+  background: var(--surface-input);
+  color: var(--text);
+}
+
+.board-tab.active {
+  background: var(--text);
+  color: var(--accent-fg);
+}
+
+.board-tab-name {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  outline: none;
+  text-transform: inherit;
+  width: auto;
+}
+
+.board-tab-name[readonly] {
+  cursor: pointer;
+}
+
+.board-tab-x {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  font-size: 0.75rem;
+  line-height: 1;
+  opacity: 0.5;
+  padding: 0 2px;
+}
+
+.board-tab-x:hover { opacity: 1; }
+
+.board-add {
+  align-items: center;
+  background: var(--surface);
+  border: 0;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: inline-flex;
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+  justify-content: center;
+  line-height: 1;
+  min-height: 30px;
+  padding: 4px 10px;
+}
+
+.board-add:hover { background: var(--surface-input); color: var(--text); }
 
 .scope-readout {
   display: flex;

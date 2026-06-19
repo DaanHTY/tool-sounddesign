@@ -41,13 +41,14 @@
   };
 
   const MODES = ['Bandpass', 'EQ Peaks'];
-  const PALETTE = ['Click', 'Plop', 'Bell', 'Sub', 'Whoosh'];
+  const PALETTE = ['Click', 'Plop', 'Bell', 'Sub', 'Whoosh', 'Chord'];
   const VOICE_COLORS = {
     Click:  '#8fd3ff',
     Plop:   '#ff9ecb',
     Bell:   '#ffd66b',
     Sub:    '#ff9b73',
     Whoosh: '#9cf0c0',
+    Chord:  '#c5a8ff',
   };
 
   const KEY_SEMITONE = {
@@ -268,6 +269,58 @@
 
   function resoLevel() {
     return dbToLin(state.gain) * Math.sqrt(state.q / 80) * STAGES;
+  }
+
+  // Self-contained sustained chord, used by the sequencer / palette pad. Unlike
+  // the live drone (which shares `notes`), this spins up its own noise source +
+  // filter bank so several scheduled chords can overlap. Root pitch comes from
+  // `rootMidi`; chord type + tone come from the current sidebar settings. It
+  // sustains for `lenSec`, then releases, and cleans itself up.
+  function playChordVoice(dest, t, rootMidi, lenSec) {
+    if (!ctx) return;
+    const intervals = CHORDS[state.chord];
+    const level = resoLevel();
+    const atk = state.attack;
+    const rel = state.release;
+    const hold = Math.max(lenSec, 0.02);
+    const tEnd = t + atk + hold + rel;
+
+    const src = ctx.createBufferSource();
+    src.buffer = noiseBuf;
+    src.loop = true;
+
+    const bus = ctx.createGain();          // shared envelope for the whole chord
+    bus.gain.setValueAtTime(0.0001, t);
+    bus.gain.linearRampToValueAtTime(level, t + atk);
+    bus.gain.setValueAtTime(level, t + atk + hold);
+    bus.gain.linearRampToValueAtTime(0.0001, tEnd);
+    bus.connect(dest);
+
+    intervals.forEach((iv, i) => {
+      const freq = midiToFreq(rootMidi + iv);
+      let node = src;
+      for (let s = 0; s < STAGES; s++) {
+        const f = ctx.createBiquadFilter();
+        f.type = 'bandpass';
+        f.frequency.value = freq;
+        f.Q.value = state.q;
+        node.connect(f);
+        node = f;
+      }
+      // optional strum: stagger note entries within the chord's own sub-gain
+      if (state.strum > 0) {
+        const ng = ctx.createGain();
+        ng.gain.setValueAtTime(0.0001, t);
+        ng.gain.linearRampToValueAtTime(1, t + i * state.strum + 0.001);
+        node.connect(ng);
+        ng.connect(bus);
+      } else {
+        node.connect(bus);
+      }
+    });
+
+    src.start(t);
+    src.stop(tEnd + 0.05);
   }
 
   function rebuildFilters() {
@@ -521,6 +574,23 @@
         src.start(t); src.stop(t + dur + 0.05);
       },
     },
+
+    // The resonant noise chord as a placeable voice. It has no params of its
+    // own — its sound is the live Resonator / Shape / FX sidebar settings, and
+    // its chord type comes from the sidebar Chord selection. The row it sits on
+    // is the chord ROOT. It sustains for its block length (handled separately
+    // via playLen); a bare play() is a short audition strike.
+    Chord: {
+      chord: true,
+      params: [],
+      play(dest, t, p, midi) {
+        const root = midi != null ? midi : baseMidi();
+        playChordVoice(dest, t, root, Math.max(state.attack + 0.12, 0.18));
+      },
+      playLen(dest, t, midi, lenSec) {
+        playChordVoice(dest, t, midi != null ? midi : baseMidi(), lenSec);
+      },
+    },
   };
 
   // Per-voice live param values, seeded from defaults.
@@ -669,6 +739,15 @@
     const host = $('voice-params');
     host.textContent = '';
     const p = voiceParams[name];
+
+    if (VOICE_DEFS[name].chord) {
+      const hint = document.createElement('p');
+      hint.className = 'voice-hint';
+      hint.textContent = 'Uses the Resonator / Shape / FX settings below and the selected Chord. Paint on the row = chord root; drag a block sideways to set its length.';
+      host.appendChild(hint);
+      return;
+    }
+
     VOICE_DEFS[name].params.forEach((pr) => {
       const row = document.createElement('div');
       row.className = 'slider-row';
@@ -857,18 +936,38 @@
   // Piano-roll sequencer
   // ============================================================================
 
+  // Each "piano board" is an independent pattern with its own notes / steps /
+  // bpm. Only the active board is shown, edited, and played.
+  let boardSeq = 1;
+  function makeBoard(name) {
+    return {
+      id: boardSeq++,
+      name: name || ('Board ' + boardSeq),
+      notes: new Map(),   // 'step:midi' -> { voice, len }
+      steps: 16,
+      bpm: 110,
+    };
+  }
+
+  const BOARDS = [makeBoard('Board 1')];
+  let activeBoardId = BOARDS[0].id;
+  const activeBoard = () => BOARDS.find((b) => b.id === activeBoardId) || BOARDS[0];
+
   const SEQ = {
     low: 36,            // C2
     high: 72,           // C5
-    steps: 16,
-    bpm: 110,
     perBeat: 4,         // 16th-note grid
-    notes: new Map(),   // 'step:midi' -> voice name
     playing: false,
     currentStep: 0,
     nextTime: 0,
     playStart: 0,
     timer: null,
+    // per-board fields proxy to the active board so existing code is unchanged
+    get notes() { return activeBoard().notes; },
+    get steps() { return activeBoard().steps; },
+    set steps(v) { activeBoard().steps = v; },
+    get bpm() { return activeBoard().bpm; },
+    set bpm(v) { activeBoard().bpm = v; },
   };
 
   const BLACK = { 1: 1, 3: 1, 6: 1, 8: 1, 10: 1 };
@@ -898,12 +997,18 @@
     return { x, y, midi, step, inGutter: x < g.gut, inRange: midi >= SEQ.low && midi <= SEQ.high };
   }
 
+  // Each entry: key 'step:midi' -> { voice, len } (len in steps, ≥1).
   function seqTriggerStep(step, when) {
-    SEQ.notes.forEach((voice, key) => {
+    SEQ.notes.forEach((note, key) => {
       const colon = key.indexOf(':');
       if (parseInt(key.slice(0, colon), 10) !== step) return;
       const midi = parseInt(key.slice(colon + 1), 10);
-      VOICE_DEFS[voice].play(fxInput, when, voiceParams[voice], midi);
+      const def = VOICE_DEFS[note.voice];
+      if (def.chord) {
+        def.playLen(fxInput, when, midi, Math.max(note.len, 1) * stepDur());
+      } else {
+        def.play(fxInput, when, voiceParams[note.voice], midi);
+      }
     });
   }
 
@@ -945,57 +1050,180 @@
 
   function setSteps(n) {
     SEQ.steps = n;
-    SEQ.notes.forEach((v, key) => {
+    SEQ.notes.forEach((note, key) => {
       const step = parseInt(key.slice(0, key.indexOf(':')), 10);
       if (step >= n) SEQ.notes.delete(key);
+      else if (step + note.len > n) note.len = n - step;   // clamp overhang
     });
   }
 
-  // ---- Roll mouse interaction ----------------------------------------------
+  // ---- Piano boards (tabs) --------------------------------------------------
 
-  let paintMode = null; // 'draw' | 'erase'
+  // Push the active board's BPM/Steps into the transport sliders (no audio
+  // side-effects beyond what those handlers already do).
+  function syncBoardSliders() {
+    const bpm = $('s-bpm'), steps = $('s-steps');
+    if (bpm) { bpm.value = activeBoard().bpm; bpm.dispatchEvent(new Event('input')); }
+    if (steps) { steps.value = activeBoard().steps; $('v-steps').textContent = activeBoard().steps; }
+  }
+
+  function switchBoard(id) {
+    if (id === activeBoardId) return;
+    if (SEQ.playing) seqStop();    // playback follows the visible board
+    activeBoardId = id;
+    syncBoardSliders();
+    renderBoardTabs();
+  }
+
+  function addBoard() {
+    const b = makeBoard('Board ' + (BOARDS.length + 1));
+    BOARDS.push(b);
+    switchBoard(b.id);
+  }
+
+  function deleteBoard(id) {
+    if (BOARDS.length === 1) return;   // always keep at least one
+    const i = BOARDS.findIndex((b) => b.id === id);
+    if (i < 0) return;
+    BOARDS.splice(i, 1);
+    if (activeBoardId === id) {
+      if (SEQ.playing) seqStop();
+      activeBoardId = BOARDS[Math.max(0, i - 1)].id;
+      syncBoardSliders();
+    }
+    renderBoardTabs();
+  }
+
+  function renameBoard(id, name) {
+    const b = BOARDS.find((x) => x.id === id);
+    if (b) b.name = name.trim() || b.name;
+  }
+
+  function renderBoardTabs() {
+    const host = $('board-tabs');
+    if (!host) return;
+    host.textContent = '';
+
+    BOARDS.forEach((b) => {
+      const tab = document.createElement('div');
+      tab.className = 'board-tab' + (b.id === activeBoardId ? ' active' : '');
+      tab.addEventListener('mousedown', (e) => {
+        if (e.target.classList.contains('board-tab-x')) return;
+        if (e.target.classList.contains('board-tab-name') && !e.target.readOnly) return;
+        switchBoard(b.id);
+      });
+
+      const name = document.createElement('input');
+      name.className = 'board-tab-name';
+      name.value = b.name;
+      name.readOnly = true;
+      name.size = Math.max(b.name.length, 3);
+      // double-click to rename
+      name.addEventListener('dblclick', (e) => {
+        e.stopPropagation();
+        name.readOnly = false;
+        name.focus();
+        name.select();
+      });
+      const commit = () => {
+        name.readOnly = true;
+        renameBoard(b.id, name.value);
+        name.value = BOARDS.find((x) => x.id === b.id).name;
+        name.size = Math.max(name.value.length, 3);
+      };
+      name.addEventListener('blur', commit);
+      name.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); name.blur(); }
+        if (e.key === 'Escape') { name.value = b.name; name.blur(); }
+        e.stopPropagation();
+      });
+      tab.appendChild(name);
+
+      if (BOARDS.length > 1) {
+        const x = document.createElement('button');
+        x.className = 'board-tab-x';
+        x.textContent = '×';
+        x.title = 'Delete board';
+        x.addEventListener('click', (e) => { e.stopPropagation(); deleteBoard(b.id); });
+        tab.appendChild(x);
+      }
+
+      host.appendChild(tab);
+    });
+
+    const add = document.createElement('button');
+    add.className = 'board-add';
+    add.textContent = '+';
+    add.title = 'New board';
+    add.addEventListener('click', addBoard);
+    host.appendChild(add);
+  }
+
+  // ---- Roll mouse interaction ----------------------------------------------
+  //
+  // Tap an empty cell to add a 1-step note; tap an existing note to remove it.
+  // Drag sideways from a note to set its length (sustained chords hold for that
+  // span). Gutter clicks audition the pitch.
+
+  let drag = null;   // { key, anchorStep, midi, moved }
+
+  // Find the note whose span covers (step, midi), returning its anchor key.
+  function noteCovering(step, midi) {
+    for (const [key, note] of SEQ.notes) {
+      const colon = key.indexOf(':');
+      const s = parseInt(key.slice(0, colon), 10);
+      const m = parseInt(key.slice(colon + 1), 10);
+      if (m === midi && step >= s && step < s + note.len) return key;
+    }
+    return null;
+  }
+
+  function auditionVoice(voice, midi) {
+    resume();
+    const def = VOICE_DEFS[voice];
+    if (def.chord) def.playLen(fxInput, ctx.currentTime + 0.001, midi, Math.max(state.attack + 0.2, 0.3));
+    else def.play(fxInput, ctx.currentTime + 0.001, voiceParams[voice], midi);
+  }
 
   function rollDown(e) {
     const canvas = $('roll');
     const c = cellAt(canvas, e.clientX, e.clientY);
     const voice = state.selectedVoice || PALETTE[0];
 
-    if (c.inGutter && c.inRange) {       // audition a pitch
-      resume();
-      VOICE_DEFS[voice].play(fxInput, ctx.currentTime + 0.001, voiceParams[voice], c.midi);
-      return;
-    }
+    if (c.inGutter && c.inRange) { auditionVoice(voice, c.midi); return; }
     if (!c.inRange || c.step < 0 || c.step >= SEQ.steps) return;
 
-    const key = c.step + ':' + c.midi;
-    if (SEQ.notes.has(key)) {
-      paintMode = 'erase';
-      SEQ.notes.delete(key);
+    const existing = noteCovering(c.step, c.midi);
+    if (existing) {
+      // Begin resizing this note; a release with no drag deletes it.
+      const anchorStep = parseInt(existing.slice(0, existing.indexOf(':')), 10);
+      drag = { key: existing, anchorStep, midi: c.midi, moved: false, wasExisting: true };
     } else {
-      paintMode = 'draw';
-      SEQ.notes.set(key, voice);
-      resume();
-      VOICE_DEFS[voice].play(fxInput, ctx.currentTime + 0.001, voiceParams[voice], c.midi);
+      const key = c.step + ':' + c.midi;
+      SEQ.notes.set(key, { voice, len: 1 });
+      drag = { key, anchorStep: c.step, midi: c.midi, moved: false, wasExisting: false };
+      auditionVoice(voice, c.midi);
     }
     window.addEventListener('mousemove', rollMove);
     window.addEventListener('mouseup', rollUp);
   }
 
   function rollMove(e) {
-    if (!paintMode) return;
+    if (!drag) return;
     const canvas = $('roll');
     const c = cellAt(canvas, e.clientX, e.clientY);
-    if (!c.inRange || c.step < 0 || c.step >= SEQ.steps || c.inGutter) return;
-    const key = c.step + ':' + c.midi;
-    if (paintMode === 'draw' && !SEQ.notes.has(key)) {
-      SEQ.notes.set(key, state.selectedVoice || PALETTE[0]);
-    } else if (paintMode === 'erase') {
-      SEQ.notes.delete(key);
-    }
+    if (c.step < 0 || c.step >= SEQ.steps) return;
+    const len = Math.max(1, c.step - drag.anchorStep + 1);
+    const note = SEQ.notes.get(drag.key);
+    if (note && note.len !== len) { note.len = len; drag.moved = true; }
   }
 
   function rollUp() {
-    paintMode = null;
+    // Tap (no drag) on an existing note removes it.
+    if (drag && !drag.moved && drag.wasExisting) {
+      SEQ.notes.delete(drag.key);
+    }
+    drag = null;
     window.removeEventListener('mousemove', rollMove);
     window.removeEventListener('mouseup', rollUp);
   }
@@ -1041,20 +1269,30 @@
         g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H); g.stroke();
       }
 
-      // notes
-      SEQ.notes.forEach((voice, key) => {
+      // notes (length spans multiple step columns)
+      SEQ.notes.forEach((note, key) => {
         const colon = key.indexOf(':');
         const step = parseInt(key.slice(0, colon), 10);
         const midi = parseInt(key.slice(colon + 1), 10);
         if (step >= SEQ.steps || midi < SEQ.low || midi > SEQ.high) return;
+        const len = Math.min(Math.max(note.len, 1), SEQ.steps - step);
         const x = geo.gut + step * geo.stepW;
         const y = (SEQ.high - midi) * geo.rowH;
-        g.fillStyle = VOICE_COLORS[voice] || '#ffffff';
+        g.fillStyle = VOICE_COLORS[note.voice] || '#ffffff';
         const r = 2;
-        const w = geo.stepW - 2, hh = geo.rowH - 2;
+        const w = geo.stepW * len - 2, hh = geo.rowH - 2;
         g.beginPath();
         g.roundRect ? g.roundRect(x + 1, y + 1, w, hh, r) : g.rect(x + 1, y + 1, w, hh);
         g.fill();
+        // segment ticks for multi-step notes
+        if (len > 1) {
+          g.strokeStyle = 'rgba(0,0,0,0.25)';
+          g.lineWidth = 1;
+          for (let s = 1; s < len; s++) {
+            const sx = x + s * geo.stepW;
+            g.beginPath(); g.moveTo(sx, y + 1); g.lineTo(sx, y + hh); g.stroke();
+          }
+        }
       });
 
       // playhead
@@ -1108,6 +1346,10 @@
     bindSlider('s-bpm', 'v-bpm', (n) => { SEQ.bpm = n; });
     bindSlider('s-steps', 'v-steps', (n) => { setSteps(n); });
     $('roll').addEventListener('mousedown', rollDown);
+
+    // piano boards (tabs)
+    renderBoardTabs();
+    syncBoardSliders();
 
     document.addEventListener('keydown', onKeyDown);
     document.addEventListener('keyup', onKeyUp);
