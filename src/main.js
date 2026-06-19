@@ -56,6 +56,10 @@
   const noteName = (m) => NOTE_NAMES[((m % 12) + 12) % 12] + (Math.floor(m / 12) - 1);
   const dbToLin = (db) => Math.pow(10, db / 20);
 
+  // Shared slider value formatters (used by FX_DEFS params).
+  const fHz = (n) => (n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k' : Math.round(n)) + 'Hz';
+  const pct = (n) => n + '%';
+
   // ---- State ---------------------------------------------------------------
 
   const state = {
@@ -71,16 +75,10 @@
     attack: 0.04,
     release: 0.6,
     strum: 0,
-    // chord fx (per-chord-voice)
-    drive: 0,
-    tone: 18000,
-    delay: 0,
-    space: 0,
-    // timeline fx (master bus)
-    tDrive: 0,
-    tTone: 18000,
-    tDelay: 0,
-    tSpace: 0,
+    // FX racks — ordered lists of effect instances {id,type,enabled,params}.
+    // chordRack is frozen onto each placed block; timelineRack is the master bus.
+    chordRack: [],
+    timelineRack: [],
     // synth voice (osc + noise blend)
     // defaults recreate the old "plop": sine, fast pitch drop, short AD
     syWave: 'sine',
@@ -111,6 +109,7 @@
   // master bus stage the whole mix passes through (so future voices get it too).
   //   chords → fxInput(chordFX) → chordFX.out → masterSum(timelineFX) →
   //            timelineFX.out → masterGain → limiter → analyser → out
+  // Each is a modular rack rebuilt from state.chordRack / state.timelineRack.
   let fxInput = null;        // == chordFX.input (voices connect here)
   let chordFX = null;
   let masterSum = null;      // == timelineFX.input
@@ -140,68 +139,310 @@
     return buffer;
   }
 
-  function makeDriveCurve(amount) {
+  function makeDriveCurve(amount, kind) {
     const k = (amount / 100) * 40;
     const n = 1024;
     const curve = new Float32Array(n);
     for (let i = 0; i < n; i++) {
       const x = (i / (n - 1)) * 2 - 1;
-      curve[i] = (1 + k) * x / (1 + k * Math.abs(x));
+      if (kind === 'fuzz') {
+        // hard-ish asymmetric clip for aggressive grit
+        const y = (1 + k) * x / (1 + k * Math.abs(x));
+        curve[i] = Math.tanh(y * (1 + k * 0.15));
+      } else if (kind === 'tube') {
+        // soft, even-harmonic warmth
+        curve[i] = Math.tanh(x * (1 + k * 0.6));
+      } else {
+        // classic soft clip
+        curve[i] = (1 + k) * x / (1 + k * Math.abs(x));
+      }
     }
     return curve;
   }
 
-  // Build one FX stage: input → drive → tone → [dry | delay | reverb] → output.
-  // Returns nodes + an apply(params) that reads {drive,tone,delay,space}.
-  function makeFXChain() {
+  // ---- Modular FX definitions ----------------------------------------------
+  //
+  // Each effect type exposes:
+  //   label    — display name
+  //   params   — [{ k, label, min, max, step, def, fmt }]
+  //   build(p) — returns { input, output, apply(p) } for an instance, building
+  //              its Web Audio subgraph. apply() retunes from a params object.
+  // Effects are chained in order; each instance's output feeds the next input.
+
+  const FX_DEFS = {
+    reverb: {
+      label: 'Reverb',
+      params: [
+        { k: 'size',    label: 'Size',    min: 0.2, max: 5,   step: 0.1, def: 1.8, fmt: (n) => n.toFixed(1) + 's' },
+        { k: 'decay',   label: 'Decay',   min: 0.5, max: 6,   step: 0.1, def: 2.6, fmt: (n) => n.toFixed(1) },
+        { k: 'damp',    label: 'Damping', min: 200, max: 18000, step: 100, def: 9000, fmt: fHz },
+        { k: 'mix',     label: 'Mix',     min: 0,   max: 100, step: 1,   def: 35,  fmt: pct },
+      ],
+      build() {
+        const input = ctx.createGain();
+        const output = ctx.createGain();
+        const dry = ctx.createGain();
+        const wet = ctx.createGain();
+        const damp = ctx.createBiquadFilter();
+        damp.type = 'lowpass';
+        const conv = ctx.createConvolver();
+        let curKey = '';
+        input.connect(dry); dry.connect(output);
+        input.connect(damp); damp.connect(conv); conv.connect(wet); wet.connect(output);
+        function apply(p) {
+          const t = ctx.currentTime;
+          const key = p.size + '|' + p.decay;
+          if (key !== curKey) { conv.buffer = makeImpulse(p.size, p.decay); curKey = key; }
+          damp.frequency.setTargetAtTime(p.damp, t, 0.02);
+          const m = p.mix / 100;
+          wet.gain.setTargetAtTime(m, t, 0.02);
+          dry.gain.setTargetAtTime(1 - m * 0.6, t, 0.02);
+        }
+        return { input, output, apply };
+      },
+    },
+
+    delay: {
+      label: 'Delay / Echo',
+      params: [
+        { k: 'time',     label: 'Time',     min: 10,  max: 1000, step: 5, def: 160, fmt: (n) => n + 'ms' },
+        { k: 'feedback', label: 'Feedback', min: 0,   max: 95,   step: 1, def: 40,  fmt: pct },
+        { k: 'tone',     label: 'Tone',     min: 400, max: 16000, step: 100, def: 6000, fmt: fHz },
+        { k: 'mix',      label: 'Mix',      min: 0,   max: 100,  step: 1, def: 35,  fmt: pct },
+      ],
+      build() {
+        const input = ctx.createGain();
+        const output = ctx.createGain();
+        const dry = ctx.createGain();
+        const send = ctx.createGain();
+        const delay = ctx.createDelay(1.5);
+        const fb = ctx.createGain();
+        const tone = ctx.createBiquadFilter();
+        tone.type = 'lowpass';
+        const wet = ctx.createGain();
+        input.connect(dry); dry.connect(output);
+        input.connect(send); send.connect(delay);
+        delay.connect(tone); tone.connect(fb); fb.connect(delay);   // damped feedback
+        delay.connect(wet); wet.connect(output);
+        function apply(p) {
+          const t = ctx.currentTime;
+          delay.delayTime.setTargetAtTime(p.time / 1000, t, 0.02);
+          fb.gain.setTargetAtTime(p.feedback / 100, t, 0.02);
+          tone.frequency.setTargetAtTime(p.tone, t, 0.02);
+          const m = p.mix / 100;
+          wet.gain.setTargetAtTime(m, t, 0.02);
+          send.gain.setTargetAtTime(1, t, 0.02);
+          dry.gain.setTargetAtTime(1, t, 0.02);
+        }
+        return { input, output, apply };
+      },
+    },
+
+    comp: {
+      label: 'Compression',
+      params: [
+        { k: 'threshold', label: 'Threshold', min: -60, max: 0,  step: 1,   def: -24, fmt: (n) => n + 'dB' },
+        { k: 'ratio',     label: 'Ratio',     min: 1,   max: 20, step: 0.5, def: 4,   fmt: (n) => n + ':1' },
+        { k: 'attack',    label: 'Attack',    min: 0,   max: 200, step: 1,  def: 3,   fmt: (n) => n + 'ms' },
+        { k: 'release',   label: 'Release',   min: 20,  max: 1000, step: 10, def: 250, fmt: (n) => n + 'ms' },
+        { k: 'makeup',    label: 'Makeup',    min: 0,   max: 24, step: 0.5, def: 0,   fmt: (n) => '+' + n + 'dB' },
+      ],
+      build() {
+        const input = ctx.createGain();
+        const comp = ctx.createDynamicsCompressor();
+        comp.knee.value = 6;
+        const makeup = ctx.createGain();
+        const output = ctx.createGain();
+        input.connect(comp); comp.connect(makeup); makeup.connect(output);
+        function apply(p) {
+          const t = ctx.currentTime;
+          comp.threshold.setTargetAtTime(p.threshold, t, 0.01);
+          comp.ratio.setTargetAtTime(p.ratio, t, 0.01);
+          comp.attack.setTargetAtTime(p.attack / 1000, t, 0.01);
+          comp.release.setTargetAtTime(p.release / 1000, t, 0.01);
+          makeup.gain.setTargetAtTime(dbToLin(p.makeup), t, 0.02);
+        }
+        return { input, output, apply };
+      },
+    },
+
+    eq: {
+      label: 'EQ',
+      params: [
+        { k: 'low',     label: 'Low',     min: -18, max: 18,   step: 0.5, def: 0,    fmt: (n) => (n > 0 ? '+' : '') + n + 'dB' },
+        { k: 'mid',     label: 'Mid',     min: -18, max: 18,   step: 0.5, def: 0,    fmt: (n) => (n > 0 ? '+' : '') + n + 'dB' },
+        { k: 'midFreq', label: 'Mid Freq', min: 200, max: 8000, step: 50, def: 1200, fmt: fHz },
+        { k: 'high',    label: 'High',    min: -18, max: 18,   step: 0.5, def: 0,    fmt: (n) => (n > 0 ? '+' : '') + n + 'dB' },
+      ],
+      build() {
+        const input = ctx.createGain();
+        const output = ctx.createGain();
+        const low = ctx.createBiquadFilter();
+        low.type = 'lowshelf'; low.frequency.value = 250;
+        const mid = ctx.createBiquadFilter();
+        mid.type = 'peaking'; mid.Q.value = 1;
+        const high = ctx.createBiquadFilter();
+        high.type = 'highshelf'; high.frequency.value = 4000;
+        input.connect(low); low.connect(mid); mid.connect(high); high.connect(output);
+        function apply(p) {
+          const t = ctx.currentTime;
+          low.gain.setTargetAtTime(p.low, t, 0.02);
+          mid.gain.setTargetAtTime(p.mid, t, 0.02);
+          mid.frequency.setTargetAtTime(p.midFreq, t, 0.02);
+          high.gain.setTargetAtTime(p.high, t, 0.02);
+        }
+        return { input, output, apply };
+      },
+    },
+
+    distortion: {
+      label: 'Distortion',
+      params: [
+        { k: 'drive',  label: 'Drive',  min: 0, max: 100, step: 1, def: 40, fmt: pct },
+        { k: 'character', label: 'Type', min: 0, max: 2, step: 1, def: 0,
+          fmt: (n) => ['Soft', 'Tube', 'Fuzz'][n] || 'Soft' },
+        { k: 'tone',   label: 'Tone',   min: 400, max: 16000, step: 100, def: 8000, fmt: fHz },
+        { k: 'mix',    label: 'Mix',    min: 0, max: 100, step: 1, def: 100, fmt: pct },
+      ],
+      build() {
+        const input = ctx.createGain();
+        const output = ctx.createGain();
+        const dry = ctx.createGain();
+        const shaper = ctx.createWaveShaper();
+        shaper.oversample = '4x';
+        const tone = ctx.createBiquadFilter();
+        tone.type = 'lowpass';
+        const wet = ctx.createGain();
+        let curKey = '';
+        input.connect(dry); dry.connect(output);
+        input.connect(shaper); shaper.connect(tone); tone.connect(wet); wet.connect(output);
+        function apply(p) {
+          const t = ctx.currentTime;
+          const kind = ['soft', 'tube', 'fuzz'][p.character] || 'soft';
+          const key = p.drive + '|' + kind;
+          if (key !== curKey) { shaper.curve = makeDriveCurve(p.drive, kind); curKey = key; }
+          tone.frequency.setTargetAtTime(p.tone, t, 0.02);
+          const m = p.mix / 100;
+          wet.gain.setTargetAtTime(m, t, 0.02);
+          dry.gain.setTargetAtTime(1 - m, t, 0.02);
+        }
+        return { input, output, apply };
+      },
+    },
+
+    pitch: {
+      label: 'Pitch Shift',
+      params: [
+        { k: 'semitones', label: 'Pitch', min: -24, max: 24, step: 1, def: -12,
+          fmt: (n) => (n > 0 ? '+' : '') + n + 'st' },
+        { k: 'window', label: 'Window', min: 30, max: 200, step: 5, def: 80, fmt: (n) => n + 'ms' },
+        { k: 'mix',    label: 'Mix',    min: 0, max: 100, step: 1, def: 100, fmt: pct },
+      ],
+      // Granular delay-line pitch shifter: two overlapping windows whose delay
+      // times ramp continuously, transposing without changing duration.
+      build() {
+        const input = ctx.createGain();
+        const output = ctx.createGain();
+        const dry = ctx.createGain();
+        const wet = ctx.createGain();
+        const grains = [0, 1].map(() => {
+          const d = ctx.createDelay(1);
+          const g = ctx.createGain();
+          input.connect(d); d.connect(g); g.connect(wet);
+          return { d, g };
+        });
+        wet.connect(output);
+        input.connect(dry); dry.connect(output);
+        let lfoTimer = null;
+        // schedule the sawtooth delay ramps + triangular crossfade in JS
+        function schedule(p) {
+          if (lfoTimer) { clearInterval(lfoTimer); lfoTimer = null; }
+          const ratio = Math.pow(2, p.semitones / 12);
+          const win = p.window / 1000;                 // window length (s)
+          const rate = Math.abs(1 - ratio) / win;      // sweeps per second
+          if (rate < 0.0001) {                         // unity → straight through
+            grains.forEach((gr, i) => {
+              gr.d.delayTime.value = 0.001;
+              gr.g.gain.value = i === 0 ? 1 : 0;
+            });
+            return;
+          }
+          const period = 1 / rate;                     // seconds per grain sweep
+          const tick = Math.max(period / 8, 0.02);
+          let phase = 0;
+          const step = () => {
+            if (!ctx) return;
+            const t = ctx.currentTime;
+            grains.forEach((gr, i) => {
+              const ph = (phase + i * 0.5) % 1;
+              // delay sweeps 0→win (down-shift) or win→0 (up-shift)
+              const dt = ratio < 1 ? ph * win : (1 - ph) * win;
+              gr.d.delayTime.setTargetAtTime(Math.max(dt, 0.0005), t, tick * 0.4);
+              // triangular window fades grains in/out at the wrap seams
+              const env = 1 - Math.abs(ph - 0.5) * 2;
+              gr.g.gain.setTargetAtTime(env, t, tick * 0.4);
+            });
+            phase = (phase + tick * rate) % 1;
+          };
+          step();
+          lfoTimer = setInterval(step, tick * 1000);
+        }
+        function apply(p) {
+          const t = ctx.currentTime;
+          schedule(p);
+          const m = p.mix / 100;
+          wet.gain.setTargetAtTime(m, t, 0.02);
+          dry.gain.setTargetAtTime(1 - m, t, 0.02);
+        }
+        function dispose() { if (lfoTimer) clearInterval(lfoTimer); }
+        return { input, output, apply, dispose };
+      },
+    },
+  };
+
+  // Order effect types appear in the picker.
+  const FX_ORDER = ['reverb', 'delay', 'comp', 'eq', 'distortion', 'pitch'];
+
+  // Default params object for a fresh instance of `type`.
+  function fxDefaults(type) {
+    const p = {};
+    FX_DEFS[type].params.forEach((pr) => { p[pr.k] = pr.def; });
+    return p;
+  }
+
+  let fxRackSeq = 1;
+  function makeFXInstance(type) {
+    return { id: fxRackSeq++, type, enabled: true, params: fxDefaults(type) };
+  }
+
+  // Build a live audio chain from a rack array (list of instances). Returns
+  // { input, output, dispose } where input→[enabled effects in order]→output.
+  // Disabled effects are bypassed. `rack` instances are mutated in place by the
+  // UI; rebuild the chain when the rack's shape (which effects / order) changes,
+  // and call apply() (via applyRack) when only param values change.
+  function buildRackChain(rack) {
     const input = ctx.createGain();
-    const drive = ctx.createWaveShaper();
-    drive.curve = makeDriveCurve(0);
-    drive.oversample = '2x';
-    const tone = ctx.createBiquadFilter();
-    tone.type = 'lowpass';
-    tone.frequency.value = 18000;
-    tone.Q.value = 0.7;
-
-    const dryNode = ctx.createGain();
-    dryNode.gain.value = 1;
-
-    const delayNode = ctx.createDelay(1.0);
-    delayNode.delayTime.value = 0.16;
-    const delayFb = ctx.createGain();
-    delayFb.gain.value = 0;
-    const delaySend = ctx.createGain();
-    delaySend.gain.value = 0;
-
-    const convolver = ctx.createConvolver();
-    convolver.buffer = makeImpulse(1.8, 2.6);
-    const reverbSend = ctx.createGain();
-    reverbSend.gain.value = 0;
-
     const output = ctx.createGain();
-
-    input.connect(drive);
-    drive.connect(tone);
-    tone.connect(dryNode); dryNode.connect(output);
-    tone.connect(delaySend);
-    delaySend.connect(delayNode);
-    delayNode.connect(delayFb);
-    delayFb.connect(delayNode);      // feedback loop
-    delayNode.connect(output);
-    tone.connect(reverbSend);
-    reverbSend.connect(convolver);
-    convolver.connect(output);
-
-    function apply(p) {
-      const t = ctx.currentTime;
-      drive.curve = makeDriveCurve(p.drive);
-      tone.frequency.setTargetAtTime(p.tone, t, 0.02);
-      delaySend.gain.setTargetAtTime((p.delay / 100) * 0.5, t, 0.02);
-      delayFb.gain.setTargetAtTime((p.delay / 100) * 0.55, t, 0.02);
-      reverbSend.gain.setTargetAtTime((p.space / 100) * 0.7, t, 0.02);
+    const instances = [];
+    let node = input;
+    rack.forEach((inst) => {
+      if (!inst.enabled) return;
+      const def = FX_DEFS[inst.type];
+      if (!def) return;
+      const built = def.build();
+      built.apply(inst.params);
+      node.connect(built.input);
+      node = built.output;
+      instances.push({ inst, built });
+    });
+    node.connect(output);
+    function apply() {
+      instances.forEach(({ inst, built }) => built.apply(inst.params));
     }
-
-    return { input, output, apply };
+    function dispose() {
+      instances.forEach(({ built }) => { if (built.dispose) built.dispose(); });
+    }
+    return { input, output, apply, dispose, instances };
   }
 
   function ensureContext() {
@@ -214,11 +455,17 @@
     dryGain = ctx.createGain();
     dryGain.gain.value = 0;
 
-    // two FX stages in series
-    chordFX = makeFXChain();
-    timelineFX = makeFXChain();
-    fxInput = chordFX.input;          // voices play into the chord FX
-    masterSum = timelineFX.input;     // whole mix sums into the timeline FX
+    // two FX stages in series — modular racks, rebuilt as effects are added.
+    // A fixed input/output gain frames each rack so the surrounding wiring is
+    // stable while the inner chain is swapped out.
+    fxInput = ctx.createGain();
+    masterSum = ctx.createGain();
+    const chordOut = ctx.createGain();
+    const timelineOut = ctx.createGain();
+    chordFX = { in: fxInput, out: chordOut, chain: null };
+    timelineFX = { in: masterSum, out: timelineOut, chain: null };
+    rebuildRack('chord');
+    rebuildRack('timeline');
 
     masterGain = ctx.createGain();
     masterGain.gain.value = state.volume;
@@ -235,16 +482,34 @@
     analyser.smoothingTimeConstant = 0.7;
     freqData = new Uint8Array(analyser.frequencyBinCount);
 
-    // wiring
+    // wiring (fxInput→chordOut and masterSum→timelineOut are bridged by the
+    // rack chains, rebuilt in rebuildRack)
     resoBus.connect(fxInput);
     dryGain.connect(fxInput);
-    chordFX.output.connect(masterSum);
-    timelineFX.output.connect(masterGain);
+    chordFX.out.connect(masterSum);
+    timelineFX.out.connect(masterGain);
     masterGain.connect(limiter);
     limiter.connect(analyser);
     analyser.connect(ctx.destination);
+  }
 
-    applyFX();
+  // Rebuild one master rack's audio chain from its state array, swapping the
+  // live chain between the stage's fixed input and output gains.
+  function rebuildRack(which) {
+    if (!ctx) return;
+    const stage = which === 'chord' ? chordFX : timelineFX;
+    const rack = which === 'chord' ? state.chordRack : state.timelineRack;
+    if (stage.chain) {
+      try { stage.in.disconnect(); } catch (e) {}
+      try { stage.chain.output.disconnect(); } catch (e) {}
+      if (stage.chain.dispose) stage.chain.dispose();
+    } else {
+      try { stage.in.disconnect(); } catch (e) {}
+    }
+    const chain = buildRackChain(rack);
+    stage.in.connect(chain.input);
+    chain.output.connect(stage.out);
+    stage.chain = chain;
   }
 
   function resume() {
@@ -252,10 +517,11 @@
     if (ctx.state === 'suspended') ctx.resume();
   }
 
+  // Re-apply param values to the live chains (cheap — no node rebuild).
   function applyFX() {
     if (!ctx) return;
-    chordFX.apply({ drive: state.drive, tone: state.tone, delay: state.delay, space: state.space });
-    timelineFX.apply({ drive: state.tDrive, tone: state.tTone, delay: state.tDelay, space: state.tSpace });
+    if (chordFX && chordFX.chain) chordFX.chain.apply();
+    if (timelineFX && timelineFX.chain) timelineFX.chain.apply();
   }
 
   // ============================================================================
@@ -294,18 +560,24 @@
   // Each voice freezes its own sound-design settings onto every placed block, so
   // later slider changes don't alter blocks already placed. The shared per-block
   // FX (drive/tone/delay/space) is captured for every voice.
-  const FX_KEYS = ['drive', 'tone', 'delay', 'space'];
   const VOICE_SNAP_KEYS = {
     Chord: ['chord', 'q', 'gain', 'noise', 'volume', 'attack', 'release', 'strum'],
     Synth: ['syWave', 'syDrop', 'syDropTime', 'syNoise', 'syCutoff',
             'syAttack', 'syDecay', 'syRelease', 'syLevel'],
   };
-  // Back-compat alias used by the chord selection/editing code.
-  const SNAP_KEYS = VOICE_SNAP_KEYS.Chord.concat(FX_KEYS);
+
+  // Deep-copy the live chord FX rack so each placed block freezes its own copy
+  // (later sidebar edits to the rack don't mutate already-placed blocks).
+  function cloneRack(rack) {
+    return rack.map((inst) => ({
+      id: inst.id, type: inst.type, enabled: inst.enabled,
+      params: Object.assign({}, inst.params),
+    }));
+  }
 
   function voiceSnapshot(voice) {
-    const s = { voice };
-    (VOICE_SNAP_KEYS[voice] || []).concat(FX_KEYS).forEach((k) => { s[k] = state[k]; });
+    const s = { voice, rack: cloneRack(state.chordRack) };
+    (VOICE_SNAP_KEYS[voice] || []).forEach((k) => { s[k] = state[k]; });
     return s;
   }
   // Chord-specific snapshot (kept for the chord code paths that call it).
@@ -327,9 +599,8 @@
     const hold = Math.max(lenSec, 0.02);
     const tEnd = t + atk + hold + rel;
 
-    // Per-chord Chord-FX chain (frozen), feeding the timeline-FX bus.
-    const fx = makeFXChain();
-    fx.apply({ drive: p.drive, tone: p.tone, delay: p.delay, space: p.space });
+    // Per-chord Chord-FX chain (frozen rack), feeding the timeline-FX bus.
+    const fx = buildRackChain(p.rack || []);
     fx.output.connect(dest);
 
     const src = ctx.createBufferSource();
@@ -370,7 +641,7 @@
     src.stop(tEnd + 0.05);
     // Tear down the per-chord FX chain a bit after the tail (delay/reverb) ends.
     const tail = tEnd + 2.5;
-    setTimeout(() => { try { fx.output.disconnect(); } catch (e) {} },
+    setTimeout(() => { try { fx.output.disconnect(); fx.dispose(); } catch (e) {} },
                Math.max((tail - ctx.currentTime) * 1000, 100));
   }
 
@@ -394,8 +665,7 @@
     const tHoldEnd = Math.max(tDecayEnd, t + atk + hold);
     const tEnd = tHoldEnd + rel;
 
-    const fx = makeFXChain();
-    fx.apply({ drive: p.drive, tone: p.tone, delay: p.delay, space: p.space });
+    const fx = buildRackChain(p.rack || []);
     fx.output.connect(dest);
 
     // tone + noise blended into one filtered amp envelope
@@ -434,7 +704,7 @@
     nz.start(t); nz.stop(tEnd + 0.05);
 
     const tail = tEnd + 2.5;
-    setTimeout(() => { try { fx.output.disconnect(); } catch (e) {} },
+    setTimeout(() => { try { fx.output.disconnect(); fx.dispose(); } catch (e) {} },
                Math.max((tail - ctx.currentTime) * 1000, 100));
   }
 
@@ -1485,10 +1755,12 @@
       set('s-strum', Math.round(p.strum * 1000));
       setSel('chord-select', p.chord);
     }
-    set('s-drive', p.drive);
-    set('s-tone', p.tone);
-    set('s-delay', p.delay);
-    set('s-space', p.space);
+    // Restore the block's frozen FX rack as the live chord rack, then rebuild.
+    // Close any open chord FX windows first — they point at the old instances.
+    closeRackWindows('chord');
+    state.chordRack = cloneRack(p.rack || []);
+    rebuildRack('chord');
+    renderRack('chord');
     state.syncing = false;
   }
 
@@ -1500,8 +1772,10 @@
     if (!note || !note.fx) { state.editingKey = null; return; }
     state.editingKey = key;
     selectVoice(note.voice);                 // show that voice's controls + pad
-    Object.keys(note.fx).forEach((k) => { if (k !== 'voice') state[k] = note.fx[k]; });
-    syncPaletteFromSnapshot(note.fx);
+    Object.keys(note.fx).forEach((k) => {
+      if (k !== 'voice' && k !== 'rack') state[k] = note.fx[k];
+    });
+    syncPaletteFromSnapshot(note.fx);         // also restores the FX rack
     applyLiveParams();
     applyFX();
     updateReadout();
@@ -1514,6 +1788,248 @@
     if (state.syncing || !state.editingKey) return;
     const note = SEQ.notes.get(state.editingKey);
     if (note) note.fx = voiceSnapshot(note.voice);
+  }
+
+  // ============================================================================
+  // Modular FX rack UI — add/remove effects + floating settings windows
+  // ============================================================================
+
+  const rackEl = (which) => $(which === 'chord' ? 'fx-rack-chord' : 'fx-rack-timeline');
+  const rackArr = (which) => (which === 'chord' ? state.chordRack : state.timelineRack);
+
+  // Open windows, keyed by `${which}:${instanceId}`, so they can be refreshed
+  // or closed when their effect is removed.
+  const fxWindows = {};
+
+  // Called whenever a rack's audio shape changes (add/remove/reorder/toggle):
+  // rebuild that chain, re-render its list, and (for the chord rack) freeze the
+  // change onto the block being edited.
+  function rackChanged(which) {
+    rebuildRack(which);
+    renderRack(which);
+    if (which === 'chord') mirrorToEditing();
+  }
+
+  // Called when only a param value changed: cheap re-apply, plus freeze.
+  function rackParamChanged(which) {
+    if (which === 'chord' && chordFX && chordFX.chain) chordFX.chain.apply();
+    else if (which === 'timeline' && timelineFX && timelineFX.chain) timelineFX.chain.apply();
+    if (which === 'chord') mirrorToEditing();
+  }
+
+  function addEffect(which, type) {
+    rackArr(which).push(makeFXInstance(type));
+    rackChanged(which);
+  }
+
+  function removeEffect(which, inst) {
+    const arr = rackArr(which);
+    const i = arr.indexOf(inst);
+    if (i >= 0) arr.splice(i, 1);
+    const key = which + ':' + inst.id;
+    if (fxWindows[key]) { fxWindows[key].remove(); delete fxWindows[key]; }
+    rackChanged(which);
+  }
+
+  function moveEffect(which, inst, dir) {
+    const arr = rackArr(which);
+    const i = arr.indexOf(inst);
+    const j = i + dir;
+    if (i < 0 || j < 0 || j >= arr.length) return;
+    arr.splice(i, 1);
+    arr.splice(j, 0, inst);
+    rackChanged(which);
+  }
+
+  // Render one rack's list of effect rows + the full-width add button.
+  function renderRack(which) {
+    const host = rackEl(which);
+    if (!host) return;
+    host.textContent = '';
+    const arr = rackArr(which);
+
+    arr.forEach((inst, idx) => {
+      const def = FX_DEFS[inst.type];
+      const row = document.createElement('div');
+      row.className = 'fx-row' + (inst.enabled ? '' : ' off');
+
+      const power = document.createElement('button');
+      power.className = 'fx-row-power' + (inst.enabled ? ' on' : '');
+      power.title = inst.enabled ? 'Bypass' : 'Enable';
+      power.textContent = '⏻';
+      power.addEventListener('click', () => { inst.enabled = !inst.enabled; rackChanged(which); });
+
+      const name = document.createElement('span');
+      name.className = 'fx-row-name';
+      name.textContent = def.label;
+
+      const up = document.createElement('button');
+      up.className = 'fx-row-btn';
+      up.textContent = '↑'; up.title = 'Move up';
+      up.disabled = idx === 0;
+      up.addEventListener('click', () => moveEffect(which, inst, -1));
+
+      const down = document.createElement('button');
+      down.className = 'fx-row-btn';
+      down.textContent = '↓'; down.title = 'Move down';
+      down.disabled = idx === arr.length - 1;
+      down.addEventListener('click', () => moveEffect(which, inst, 1));
+
+      const gear = document.createElement('button');
+      gear.className = 'fx-row-btn';
+      gear.textContent = '⚙'; gear.title = 'Settings';
+      gear.addEventListener('click', () => openFXWindow(which, inst));
+
+      const x = document.createElement('button');
+      x.className = 'fx-row-btn fx-row-x';
+      x.textContent = '×'; x.title = 'Remove';
+      x.addEventListener('click', () => removeEffect(which, inst));
+
+      row.appendChild(power);
+      row.appendChild(name);
+      row.appendChild(up);
+      row.appendChild(down);
+      row.appendChild(gear);
+      row.appendChild(x);
+      host.appendChild(row);
+    });
+
+    // Full-width add button — opens the type picker; sits below the list.
+    const add = document.createElement('button');
+    add.className = 'fx-add';
+    add.innerHTML = '<span class="fx-add-plus">+</span>';
+    add.addEventListener('click', (e) => { e.stopPropagation(); toggleAddMenu(which, add); });
+    host.appendChild(add);
+  }
+
+  // A small popover under the add button listing the effect types.
+  let openAddMenu = null;
+  function closeAddMenu() {
+    if (openAddMenu) { openAddMenu.remove(); openAddMenu = null; }
+    document.removeEventListener('click', closeAddMenu);
+  }
+  function toggleAddMenu(which, anchor) {
+    if (openAddMenu) { closeAddMenu(); return; }
+    const menu = document.createElement('div');
+    menu.className = 'fx-add-menu';
+    FX_ORDER.forEach((type) => {
+      const item = document.createElement('button');
+      item.className = 'fx-add-item';
+      item.textContent = FX_DEFS[type].label;
+      item.addEventListener('click', (e) => {
+        e.stopPropagation();
+        closeAddMenu();
+        addEffect(which, type);
+      });
+      menu.appendChild(item);
+    });
+    const r = anchor.getBoundingClientRect();
+    menu.style.left = r.left + 'px';
+    menu.style.top = (r.bottom + 4) + 'px';
+    menu.style.width = r.width + 'px';
+    document.body.appendChild(menu);
+    openAddMenu = menu;
+    // close on outside click (defer so this click doesn't immediately close it)
+    setTimeout(() => document.addEventListener('click', closeAddMenu), 0);
+  }
+
+  // ---- Floating, draggable settings window ----------------------------------
+
+  function openFXWindow(which, inst) {
+    const key = which + ':' + inst.id;
+    if (fxWindows[key]) { bringToFront(fxWindows[key]); return; }
+    const def = FX_DEFS[inst.type];
+
+    const win = document.createElement('div');
+    win.className = 'fx-window';
+    const host = $('fx-windows');
+    // stagger position so multiple windows don't stack exactly
+    const n = Object.keys(fxWindows).length;
+    win.style.left = (140 + n * 24) + 'px';
+    win.style.top = (90 + n * 24) + 'px';
+
+    const head = document.createElement('div');
+    head.className = 'fx-window-head';
+    const title = document.createElement('span');
+    title.className = 'fx-window-title';
+    title.textContent = def.label + (which === 'timeline' ? ' · Timeline' : '');
+    const close = document.createElement('button');
+    close.className = 'fx-window-x';
+    close.textContent = '×';
+    close.addEventListener('click', () => { win.remove(); delete fxWindows[key]; });
+    head.appendChild(title);
+    head.appendChild(close);
+
+    const body = document.createElement('div');
+    body.className = 'fx-window-body';
+
+    def.params.forEach((pr) => {
+      const rowEl = document.createElement('div');
+      rowEl.className = 'slider-row';
+      const label = document.createElement('label');
+      label.textContent = pr.label;
+      const input = document.createElement('input');
+      input.type = 'range';
+      input.min = pr.min; input.max = pr.max; input.step = pr.step;
+      input.value = inst.params[pr.k];
+      const val = document.createElement('span');
+      val.className = 'val';
+      const fmt = pr.fmt || String;
+      val.textContent = fmt(inst.params[pr.k]);
+      input.addEventListener('input', () => {
+        const num = parseFloat(input.value);
+        inst.params[pr.k] = num;
+        val.textContent = fmt(num);
+        rackParamChanged(which);
+      });
+      rowEl.appendChild(label);
+      rowEl.appendChild(input);
+      rowEl.appendChild(val);
+      body.appendChild(rowEl);
+    });
+
+    win.appendChild(head);
+    win.appendChild(body);
+    host.appendChild(win);
+    fxWindows[key] = win;
+    bringToFront(win);
+    makeDraggable(win, head);
+  }
+
+  // Close every open settings window belonging to one rack (used when its
+  // instances are swapped out wholesale, e.g. selecting a different block).
+  function closeRackWindows(which) {
+    Object.keys(fxWindows).forEach((key) => {
+      if (key.indexOf(which + ':') === 0) {
+        fxWindows[key].remove();
+        delete fxWindows[key];
+      }
+    });
+  }
+
+  let fxWinZ = 50;
+  function bringToFront(win) { win.style.zIndex = ++fxWinZ; }
+
+  function makeDraggable(win, handle) {
+    let dx = 0, dy = 0;
+    handle.addEventListener('mousedown', (e) => {
+      if (e.target.classList.contains('fx-window-x')) return;
+      e.preventDefault();
+      bringToFront(win);
+      const r = win.getBoundingClientRect();
+      dx = e.clientX - r.left;
+      dy = e.clientY - r.top;
+      const move = (ev) => {
+        win.style.left = Math.max(0, Math.min(window.innerWidth - 40, ev.clientX - dx)) + 'px';
+        win.style.top = Math.max(0, Math.min(window.innerHeight - 30, ev.clientY - dy)) + 'px';
+      };
+      const up = () => {
+        window.removeEventListener('mousemove', move);
+        window.removeEventListener('mouseup', up);
+      };
+      window.addEventListener('mousemove', move);
+      window.addEventListener('mouseup', up);
+    });
   }
 
   function rollDown(e) {
@@ -1742,17 +2258,9 @@
     bindSlider('sy-release', 'vy-release', (n) => { state.syRelease = n; mirrorToEditing(); }, (n) => n + 'ms');
     bindSlider('sy-level', 'vy-level', (n) => { state.syLevel = n; mirrorToEditing(); });
 
-    // Chord FX — per-chord-voice (frozen onto the chord when placed/edited)
-    bindSlider('s-drive', 'v-drive', (n) => { state.drive = n; applyFX(); mirrorToEditing(); });
-    bindSlider('s-tone', 'v-tone', (n) => { state.tone = n; applyFX(); mirrorToEditing(); }, fHzShort);
-    bindSlider('s-delay', 'v-delay', (n) => { state.delay = n; applyFX(); mirrorToEditing(); });
-    bindSlider('s-space', 'v-space', (n) => { state.space = n; applyFX(); mirrorToEditing(); });
-
-    // Timeline FX — master bus
-    bindSlider('s-tdrive', 'v-tdrive', (n) => { state.tDrive = n; applyFX(); });
-    bindSlider('s-ttone', 'v-ttone', (n) => { state.tTone = n; applyFX(); }, fHzShort);
-    bindSlider('s-tdelay', 'v-tdelay', (n) => { state.tDelay = n; applyFX(); });
-    bindSlider('s-tspace', 'v-tspace', (n) => { state.tSpace = n; applyFX(); });
+    // Modular FX racks — Chord (per-block) + Timeline (master bus)
+    renderRack('chord');
+    renderRack('timeline');
 
     // sidebar tabs (Chord | Timeline)
     $('side-tabs').addEventListener('click', (e) => {

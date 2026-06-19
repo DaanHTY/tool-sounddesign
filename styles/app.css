@@ -672,6 +672,204 @@ body {
   text-transform: uppercase;
 }
 
+/* ---- Modular FX rack ------------------------------------------------------ */
+
+.fx-rack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.fx-row {
+  align-items: center;
+  background: var(--surface);
+  border-radius: var(--radius-sm);
+  clip-path: inset(0 round var(--radius-sm));
+  display: flex;
+  gap: 4px;
+  min-height: 38px;
+  padding: 0 6px 0 8px;
+}
+
+.fx-row.off {
+  opacity: 0.45;
+}
+
+.fx-row-name {
+  color: var(--text);
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  letter-spacing: -0.02em;
+  margin-right: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.fx-row-power {
+  background: transparent;
+  border: 0;
+  border-radius: 99px;
+  color: var(--text-subtle);
+  cursor: pointer;
+  flex-shrink: 0;
+  font-size: 0.75rem;
+  height: 22px;
+  line-height: 1;
+  width: 22px;
+}
+
+.fx-row-power.on { color: var(--text); }
+.fx-row-power:hover { background: var(--surface-input); }
+
+.fx-row-btn {
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  font-size: 0.75rem;
+  height: 26px;
+  line-height: 1;
+  width: 24px;
+}
+
+.fx-row-btn:hover:not(:disabled) {
+  background: var(--surface-input);
+  color: var(--text);
+}
+
+.fx-row-btn:disabled { opacity: 0.25; cursor: default; }
+.fx-row-x:hover:not(:disabled) { color: var(--error); }
+
+.fx-add {
+  align-items: center;
+  background: var(--surface);
+  border: 1px dashed rgba(255, 255, 255, 0.18);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  display: flex;
+  justify-content: center;
+  min-height: 38px;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  width: 100%;
+}
+
+.fx-add:hover {
+  background: var(--surface-input);
+  border-color: rgba(255, 255, 255, 0.3);
+  color: var(--text);
+}
+
+.fx-add-plus {
+  font-family: var(--font-mono);
+  font-size: 1.125rem;
+  line-height: 1;
+}
+
+.fx-add-menu {
+  background: var(--island-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 4px;
+  position: fixed;
+  z-index: 200;
+}
+
+.fx-add-item {
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  letter-spacing: -0.02em;
+  padding: 9px 10px;
+  text-align: left;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.fx-add-item:hover {
+  background: var(--surface-input);
+}
+
+/* ---- Floating FX settings windows ----------------------------------------- */
+
+.fx-window {
+  background: var(--island-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
+  display: flex;
+  flex-direction: column;
+  position: fixed;
+  width: 280px;
+}
+
+.fx-window-head {
+  align-items: center;
+  background: var(--surface);
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  cursor: grab;
+  display: flex;
+  gap: 8px;
+  padding: 10px 10px 10px 14px;
+  user-select: none;
+}
+
+.fx-window-head:active { cursor: grabbing; }
+
+.fx-window-title {
+  color: var(--text);
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  letter-spacing: -0.02em;
+  text-transform: uppercase;
+}
+
+.fx-window-x {
+  background: transparent;
+  border: 0;
+  border-radius: 99px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.875rem;
+  height: 22px;
+  line-height: 1;
+  width: 22px;
+}
+
+.fx-window-x:hover { background: var(--surface-input); color: var(--text); }
+
+.fx-window-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--tool-control-gap);
+  padding: 16px 14px;
+}
+
+.fx-window-body .slider-row label { width: 72px; }
+
+.fx-window-body .val {
+  background: var(--surface-input);
+  border-radius: 99px;
+  font-variant-numeric: tabular-nums;
+  min-width: 54px;
+  padding: 5px 10px;
+  text-align: center;
+}
+
 /* ---- Mobile --------------------------------------------------------------- */
 
 @media (max-width: 760px) {

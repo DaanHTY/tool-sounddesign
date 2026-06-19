@@ -139,26 +139,7 @@
 
         <section class="section">
           <p class="section-label">FX</p>
-          <div class="slider-row">
-            <label for="s-drive">Drive</label>
-            <input type="range" id="s-drive" min="0" max="100" step="1" value="0" />
-            <span class="val" id="v-drive">0</span>
-          </div>
-          <div class="slider-row">
-            <label for="s-tone">Tone</label>
-            <input type="range" id="s-tone" min="200" max="18000" step="100" value="18000" />
-            <span class="val" id="v-tone">18k</span>
-          </div>
-          <div class="slider-row">
-            <label for="s-delay">Delay</label>
-            <input type="range" id="s-delay" min="0" max="100" step="1" value="0" />
-            <span class="val" id="v-delay">0</span>
-          </div>
-          <div class="slider-row">
-            <label for="s-space">Space</label>
-            <input type="range" id="s-space" min="0" max="100" step="1" value="0" />
-            <span class="val" id="v-space">0</span>
-          </div>
+          <div class="fx-rack" id="fx-rack-chord"></div>
         </section>
       </div>
 
@@ -166,26 +147,7 @@
         <section class="section">
           <p class="section-label">Timeline FX</p>
           <p class="voice-hint">Applied to the whole timeline output — every block, not just chords.</p>
-          <div class="slider-row">
-            <label for="s-tdrive">Drive</label>
-            <input type="range" id="s-tdrive" min="0" max="100" step="1" value="0" />
-            <span class="val" id="v-tdrive">0</span>
-          </div>
-          <div class="slider-row">
-            <label for="s-ttone">Tone</label>
-            <input type="range" id="s-ttone" min="200" max="18000" step="100" value="18000" />
-            <span class="val" id="v-ttone">18k</span>
-          </div>
-          <div class="slider-row">
-            <label for="s-tdelay">Delay</label>
-            <input type="range" id="s-tdelay" min="0" max="100" step="1" value="0" />
-            <span class="val" id="v-tdelay">0</span>
-          </div>
-          <div class="slider-row">
-            <label for="s-tspace">Space</label>
-            <input type="range" id="s-tspace" min="0" max="100" step="1" value="0" />
-            <span class="val" id="v-tspace">0</span>
-          </div>
+          <div class="fx-rack" id="fx-rack-timeline"></div>
         </section>
       </div>
 
@@ -246,6 +208,9 @@
       </div>
     </main>
   </div>
+
+  <!-- Floating FX settings windows mount here -->
+  <div id="fx-windows"></div>
 
   <script src="src/main.js"></script>
 </body>
