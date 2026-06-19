@@ -1,0 +1,165 @@
+/* =============================================================================
+   Hear The Youth — Tool UI design system
+   Brand tokens, fonts en standaard componenten.
+   Tool-specifieke styling hoort in app.css.
+   ============================================================================= */
+
+@font-face {
+  font-family: 'Suisse Intl';
+  src: url('../assets/fonts/Suisse/SuisseIntl-Regular-WebXL.woff2') format('woff2');
+  font-weight: 300;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Suisse Intl';
+  src: url('../assets/fonts/Suisse/SuisseIntl-Book-WebXL.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Suisse Intl';
+  src: url('../assets/fonts/Suisse/SuisseIntl-Medium-WebXL.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Suisse Intl';
+  src: url('../assets/fonts/Suisse/SuisseIntl-SemiBold-WebXL.woff2') format('woff2');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Suisse Intl Mono';
+  src: url('../assets/fonts/Suisse/SuisseIntlMono-Regular-WebXL.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --page-bg: #191919;
+  --island-bg: #000000;
+  --surface: #262626;
+  --surface-input: #333333;
+  --text: #ffffff;
+  --text-muted: rgba(255, 255, 255, 0.55);
+  --text-subtle: rgba(255, 255, 255, 0.45);
+  --border: rgba(255, 255, 255, 0.12);
+  --accent: #ffffff;
+  --accent-fg: #0f0f12;
+  --error: #ffb4b4;
+  --control-track: rgba(255, 255, 255, 0.35);
+  --control-thumb: #ffffff;
+  --radius: 24px;
+  --radius-sm: 12px;
+  --font-sans: 'Suisse Intl', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  --font-mono: 'Suisse Intl Mono', 'Courier New', Courier, monospace;
+
+  font-feature-settings: 'ss01' 1;
+  color-scheme: dark;
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-weight: 300;
+  background: var(--page-bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: -0.02em;
+}
+
+h2 {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 400;
+  letter-spacing: -0.02em;
+  margin: 0 0 10px;
+  text-transform: uppercase;
+}
+
+/* Sliders (brand "kerning" stijl: dunne lijn + witte ronde thumb) */
+.slider-row {
+  align-items: center;
+  display: flex;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  gap: 10px;
+  letter-spacing: -0.02em;
+  text-transform: uppercase;
+}
+
+.slider-row label {
+  color: var(--text-muted);
+  flex-shrink: 0;
+  width: 58px;
+  white-space: nowrap;
+}
+
+.slider-row input[type='range'],
+input[type='range'] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: linear-gradient(var(--control-track), var(--control-track)) no-repeat center / 100% 1px;
+  border-radius: 0;
+  cursor: pointer;
+  height: 24px;
+  margin: 0;
+  outline: none;
+  padding: 0;
+  touch-action: none;
+}
+
+.slider-row input[type='range'] {
+  flex: 1;
+}
+
+.slider-row input[type='range']::-webkit-slider-thumb,
+input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  background: var(--control-thumb);
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  height: 18px;
+  width: 18px;
+}
+
+.slider-row input[type='range']::-moz-range-thumb,
+input[type='range']::-moz-range-thumb {
+  background: var(--control-thumb);
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  height: 18px;
+  width: 18px;
+}
+
+.slider-row input[type='range']:focus,
+input[type='range']:focus {
+  outline: none;
+}
+
+.slider-row .val {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}

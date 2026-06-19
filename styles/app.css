@@ -1,0 +1,328 @@
+/* HTY skin for the Sound Design tool (noise → resonant chord generator). */
+
+:root {
+  --tool-outer-gap: 12px;
+  --tool-sidebar-pad: 24px;
+  --tool-section-gap: 28px;
+  --tool-control-gap: 12px;
+}
+
+html,
+body {
+  height: 100%;
+  background: var(--page-bg) !important;
+  color: var(--text);
+}
+
+html {
+  font-size: 16px;
+}
+
+body {
+  margin: 0;
+  padding: 0 !important;
+  overflow: hidden;
+}
+
+.app {
+  width: 100%;
+  height: 100vh;
+  display: grid;
+  grid-template-columns: 340px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  gap: 0 var(--tool-outer-gap);
+  overflow: hidden;
+  padding: var(--tool-outer-gap);
+}
+
+/* ---- Sidebar -------------------------------------------------------------- */
+
+.sidebar-column {
+  background: var(--island-bg);
+  border-radius: var(--radius);
+  clip-path: inset(0 round var(--radius));
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.app-header {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  padding: var(--tool-sidebar-pad) var(--tool-sidebar-pad) 0;
+}
+
+.app-title {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+  font-weight: 400;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+  margin: 0;
+  text-transform: uppercase;
+}
+
+.app-subtitle {
+  color: var(--text-subtle);
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  letter-spacing: -0.02em;
+  line-height: 1.3;
+  margin-top: 6px;
+  text-transform: uppercase;
+}
+
+.sidebar-scroll {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--tool-section-gap);
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: var(--tool-sidebar-pad);
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.sidebar-scroll::-webkit-scrollbar {
+  display: none;
+  height: 0;
+  width: 0;
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--tool-control-gap);
+}
+
+.section-label {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 400;
+  letter-spacing: -0.02em;
+  margin: 0;
+  text-transform: uppercase;
+}
+
+/* ---- Note / chord grids --------------------------------------------------- */
+
+.btn-grid {
+  display: grid;
+  gap: 6px;
+}
+
+.btn-grid.notes {
+  grid-template-columns: repeat(6, 1fr);
+}
+
+.btn-grid.chords {
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.chip {
+  background: var(--surface);
+  border: 0;
+  border-radius: var(--radius-sm);
+  clip-path: inset(0 round var(--radius-sm));
+  color: var(--text-muted);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  font-weight: 400;
+  letter-spacing: -0.02em;
+  min-height: 38px;
+  padding: 8px 6px;
+  text-transform: uppercase;
+  transition: background 0.15s ease, color 0.15s ease;
+  white-space: nowrap;
+}
+
+.chip:hover {
+  background: var(--surface-input);
+  color: var(--text);
+}
+
+.chip.active {
+  background: var(--text);
+  color: var(--accent-fg);
+}
+
+/* ---- Sliders -------------------------------------------------------------- */
+
+.slider-row label {
+  width: 84px;
+}
+
+.slider-row .val {
+  background: var(--surface-input);
+  border-radius: 99px;
+  font-variant-numeric: tabular-nums;
+  min-width: 54px;
+  padding: 5px 10px;
+  text-align: center;
+}
+
+/* ---- Transport ------------------------------------------------------------ */
+
+.transport {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  gap: var(--tool-control-gap);
+  padding: 0 var(--tool-sidebar-pad) var(--tool-sidebar-pad);
+}
+
+.btn {
+  align-items: center;
+  background: var(--surface);
+  border: 0;
+  border-radius: var(--radius-sm);
+  clip-path: inset(0 round var(--radius-sm));
+  color: var(--text);
+  cursor: pointer;
+  display: inline-flex;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 400;
+  justify-content: center;
+  letter-spacing: -0.02em;
+  line-height: 1;
+  min-height: 48px;
+  padding: 8px 14px;
+  text-transform: uppercase;
+  transition: background 0.15s ease, color 0.15s ease, filter 0.15s ease;
+  width: 100%;
+}
+
+.btn:hover {
+  background: var(--surface-input);
+}
+
+.btn-primary {
+  background: var(--text);
+  color: var(--accent-fg);
+}
+
+.btn-primary:hover {
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.btn-primary.playing {
+  background: var(--error);
+  color: var(--accent-fg);
+}
+
+.transport-row {
+  display: grid;
+  gap: var(--tool-control-gap);
+  grid-template-columns: 1fr 1fr;
+}
+
+#btn-record.recording {
+  background: var(--error);
+  color: var(--accent-fg);
+  animation: rec-pulse 1s ease-in-out infinite;
+}
+
+@keyframes rec-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+.kbd-hint {
+  color: var(--text-subtle);
+  font-family: var(--font-mono);
+  font-size: 0.5625rem;
+  letter-spacing: -0.02em;
+  line-height: 1.4;
+  margin: 4px 0 0;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+/* ---- Preview / analyser --------------------------------------------------- */
+
+.preview-column {
+  background: var(--page-bg);
+  display: flex;
+  flex-direction: column;
+  gap: var(--tool-outer-gap);
+  min-height: 0;
+  overflow: hidden;
+  padding: var(--tool-outer-gap);
+  position: relative;
+}
+
+.scope-frame {
+  background: var(--island-bg);
+  border-radius: var(--radius);
+  clip-path: inset(0 round var(--radius));
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+#scope {
+  display: block;
+  height: 100%;
+  width: 100%;
+}
+
+.scope-readout {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 28px;
+  flex-shrink: 0;
+  padding: 0 12px 4px;
+}
+
+.readout-item {
+  align-items: baseline;
+  display: flex;
+  gap: 8px;
+}
+
+.readout-label {
+  color: var(--text-subtle);
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  letter-spacing: -0.02em;
+  text-transform: uppercase;
+}
+
+.readout-val {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  text-transform: uppercase;
+}
+
+/* ---- Mobile --------------------------------------------------------------- */
+
+@media (max-width: 760px) {
+  .app {
+    display: flex;
+    flex-direction: column;
+    height: 100dvh;
+  }
+
+  .preview-column {
+    flex: 0 0 38vh;
+    order: -1;
+  }
+
+  .sidebar-column {
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+}

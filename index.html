@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>HTY — Sound Design</title>
+  <link rel="stylesheet" href="styles/brand.css" />
+  <link rel="stylesheet" href="styles/app.css" />
+</head>
+<body>
+  <div class="app">
+    <!-- Controls -->
+    <aside class="sidebar-column">
+      <header class="app-header">
+        <h1 class="app-title">Noise Chords</h1>
+        <span class="app-subtitle">White noise → resonant filter bank</span>
+      </header>
+
+      <div class="sidebar-scroll">
+        <section class="section">
+          <p class="section-label">Root note</p>
+          <div class="btn-grid notes" id="note-grid"></div>
+        </section>
+
+        <section class="section">
+          <p class="section-label">Chord</p>
+          <div class="btn-grid chords" id="chord-grid"></div>
+        </section>
+
+        <section class="section">
+          <p class="section-label">Mode</p>
+          <div class="btn-grid" id="mode-grid" style="grid-template-columns: repeat(2, 1fr);"></div>
+        </section>
+
+        <section class="section">
+          <p class="section-label">Resonator</p>
+          <div class="slider-row">
+            <label for="s-octave">Octave</label>
+            <input type="range" id="s-octave" min="1" max="5" step="1" value="3" />
+            <span class="val" id="v-octave">3</span>
+          </div>
+          <div class="slider-row">
+            <label for="s-q">Tightness</label>
+            <input type="range" id="s-q" min="2" max="500" step="1" value="250" />
+            <span class="val" id="v-q">250</span>
+          </div>
+          <div class="slider-row">
+            <label for="s-gain">Peak</label>
+            <input type="range" id="s-gain" min="-6" max="50" step="1" value="15" />
+            <span class="val" id="v-gain">15dB</span>
+          </div>
+          <div class="slider-row">
+            <label for="s-noise">Noise</label>
+            <input type="range" id="s-noise" min="0" max="100" step="1" value="35" />
+            <span class="val" id="v-noise">35</span>
+          </div>
+          <div class="slider-row">
+            <label for="s-vol">Volume</label>
+            <input type="range" id="s-vol" min="0" max="100" step="1" value="35" />
+            <span class="val" id="v-vol">35</span>
+          </div>
+        </section>
+
+        <section class="section">
+          <p class="section-label">Shape</p>
+          <div class="slider-row">
+            <label for="s-attack">Attack</label>
+            <input type="range" id="s-attack" min="1" max="2000" step="1" value="40" />
+            <span class="val" id="v-attack">40</span>
+          </div>
+          <div class="slider-row">
+            <label for="s-release">Release</label>
+            <input type="range" id="s-release" min="20" max="4000" step="10" value="600" />
+            <span class="val" id="v-release">600</span>
+          </div>
+          <div class="slider-row">
+            <label for="s-strum">Strum</label>
+            <input type="range" id="s-strum" min="0" max="300" step="1" value="0" />
+            <span class="val" id="v-strum">0</span>
+          </div>
+        </section>
+      </div>
+
+      <div class="transport">
+        <div class="transport-row">
+          <button class="btn" id="btn-strike">Strike</button>
+          <button class="btn btn-primary" id="btn-play">Drone</button>
+        </div>
+        <button class="btn" id="btn-record">● Record</button>
+        <p class="kbd-hint">Keys A–K play roots · Space toggles drone</p>
+      </div>
+    </aside>
+
+    <!-- Spectrum -->
+    <main class="preview-column">
+      <div class="scope-frame">
+        <canvas id="scope"></canvas>
+      </div>
+      <div class="scope-readout">
+        <div class="readout-item">
+          <span class="readout-label">Chord</span>
+          <span class="readout-val" id="r-chord">—</span>
+        </div>
+        <div class="readout-item">
+          <span class="readout-label">Notes</span>
+          <span class="readout-val" id="r-notes">—</span>
+        </div>
+        <div class="readout-item">
+          <span class="readout-label">Freqs</span>
+          <span class="readout-val" id="r-freqs">—</span>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="src/main.js"></script>
+</body>
+</html>
