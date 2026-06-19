@@ -946,6 +946,7 @@
       notes: new Map(),   // 'step:midi' -> { voice, len }
       steps: 16,
       bpm: 110,
+      arrange: [[]],      // this board's OWN arrangement: array of lanes of clips
     };
   }
 
@@ -1033,12 +1034,15 @@
 
   function seqStop() {
     SEQ.playing = false;
-    if (SEQ.timer) { clearInterval(SEQ.timer); SEQ.timer = null; }
+    if (SEQ.timer) { clearInterval(SEQ.timer); clearTimeout(SEQ.timer); SEQ.timer = null; }
     updateSeqButton();
   }
 
   function toggleSeq() {
-    if (SEQ.playing) seqStop();
+    if (SEQ.playing) { seqStop(); return; }
+    // The single transport plays the arrangement when clips exist, otherwise
+    // the currently visible board.
+    if (arrHasClips()) arrPlay();
     else seqPlay();
   }
 
@@ -1073,6 +1077,9 @@
     activeBoardId = id;
     syncBoardSliders();
     renderBoardTabs();
+    // arrangement is per-board: show this board's own clips (or hide if none)
+    renderArrange();
+    refreshArrangeVisibility();
   }
 
   function addBoard() {
@@ -1086,12 +1093,20 @@
     const i = BOARDS.findIndex((b) => b.id === id);
     if (i < 0) return;
     BOARDS.splice(i, 1);
+    // drop clips referencing this board from EVERY board's arrangement
+    BOARDS.forEach((bd) => bd.arrange.forEach((lane) => {
+      for (let j = lane.length - 1; j >= 0; j--) {
+        if (lane[j].boardId === id) lane.splice(j, 1);
+      }
+    }));
     if (activeBoardId === id) {
       if (SEQ.playing) seqStop();
       activeBoardId = BOARDS[Math.max(0, i - 1)].id;
       syncBoardSliders();
     }
     renderBoardTabs();
+    renderArrange();
+    refreshArrangeVisibility();
   }
 
   function renameBoard(id, name) {
@@ -1107,11 +1122,24 @@
     BOARDS.forEach((b) => {
       const tab = document.createElement('div');
       tab.className = 'board-tab' + (b.id === activeBoardId ? ' active' : '');
-      tab.addEventListener('mousedown', (e) => {
+      tab.draggable = true;
+      let tabDragged = false;
+      // Switch on click, not mousedown, so dragging a tab onto the timeline
+      // doesn't first switch to (and thus self-target) that board.
+      tab.addEventListener('click', (e) => {
+        if (tabDragged) { tabDragged = false; return; }
         if (e.target.classList.contains('board-tab-x')) return;
         if (e.target.classList.contains('board-tab-name') && !e.target.readOnly) return;
         switchBoard(b.id);
       });
+      // Drag a tab onto the piano canvas to nest it as a clip in the arrangement.
+      tab.addEventListener('dragstart', (e) => {
+        tabDragged = true;
+        e.dataTransfer.setData('text/board-id', String(b.id));
+        e.dataTransfer.effectAllowed = 'copy';
+        tab.classList.add('dragging');
+      });
+      tab.addEventListener('dragend', () => tab.classList.remove('dragging'));
 
       const name = document.createElement('input');
       name.className = 'board-tab-name';
@@ -1157,6 +1185,274 @@
     add.title = 'New board';
     add.addEventListener('click', addBoard);
     host.appendChild(add);
+  }
+
+  // ============================================================================
+  // Arrangement timeline — nest boards as clips ("precomps") on layered lanes
+  // ============================================================================
+  //
+  // Hidden until a board tab is dropped onto the piano canvas. Each clip points
+  // at a note-board (flat — no clip references another arrangement) and plays
+  // that board's whole pattern once. Clip width = pattern length in seconds.
+
+  // Each board owns its arrangement (board.arrange). ARR.lanes proxies to the
+  // active (host) board, so the timeline always shows that board's own clips.
+  const ARR = {
+    pxPerSec: 80,         // horizontal time scale
+    clipSeq: 1,
+    get lanes() { return activeBoard().arrange; },
+    set lanes(v) { activeBoard().arrange = v; },
+  };
+  let arrDragClip = null;  // { clip, grabDX } while dragging a clip
+
+  const boardById = (id) => BOARDS.find((b) => b.id === id);
+  const boardStepDur = (b) => 60 / b.bpm / SEQ.perBeat;
+  const boardLen = (b) => b ? b.steps * boardStepDur(b) : 0;  // pattern seconds
+  const arrHasClips = () => ARR.lanes.some((l) => l.length);
+
+  // Snap a time (seconds) to the HOST board's step grid.
+  function snapToHostStep(sec) {
+    const sd = boardStepDur(activeBoard());
+    return sd > 0 ? Math.max(0, Math.round(sec / sd) * sd) : Math.max(0, sec);
+  }
+
+  function showArrange(show) {
+    $('arrange').hidden = !show;
+  }
+
+  // Show/hide the panel based on whether the visible board has any clips.
+  function refreshArrangeVisibility() {
+    showArrange(arrHasClips());
+  }
+
+  function addClip(boardId, laneIdx, start) {
+    const lane = ARR.lanes[laneIdx] || ARR.lanes[0];
+    lane.push({ id: ARR.clipSeq++, boardId, start: snapToHostStep(start) });
+    showArrange(true);
+    renderArrange();
+  }
+
+  function deleteClip(clip) {
+    ARR.lanes.forEach((lane) => {
+      const i = lane.indexOf(clip);
+      if (i >= 0) lane.splice(i, 1);
+    });
+    renderArrange();
+    refreshArrangeVisibility();
+  }
+
+  function addLane() { ARR.lanes.push([]); renderArrange(); }
+
+  function clearArrange() {
+    if (SEQ.playing) seqStop();
+    ARR.lanes = [[]];
+    renderArrange();
+    showArrange(false);
+  }
+
+  function renderArrange() {
+    const host = $('arrange-lanes');
+    if (!host) return;
+    host.textContent = '';
+
+    // host board's step grid, drawn as a repeating background on every lane
+    const stepPx = boardStepDur(activeBoard()) * ARR.pxPerSec;
+    const beatPx = stepPx * SEQ.perBeat;
+    const gridBg = stepPx > 1
+      ? `repeating-linear-gradient(to right,
+           rgba(255,255,255,0.10) 0 1px, transparent 1px ${beatPx}px),
+         repeating-linear-gradient(to right,
+           rgba(255,255,255,0.04) 0 1px, transparent 1px ${stepPx}px)`
+      : 'none';
+
+    ARR.lanes.forEach((lane, laneIdx) => {
+      const laneEl = document.createElement('div');
+      laneEl.className = 'arrange-lane';
+      laneEl.dataset.lane = laneIdx;
+      laneEl.style.backgroundImage = gridBg;
+
+      // drop targets (tab→clip and clip move)
+      laneEl.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        laneEl.classList.add('drop-target');
+      });
+      laneEl.addEventListener('dragleave', () => laneEl.classList.remove('drop-target'));
+      laneEl.addEventListener('drop', (e) => {
+        e.preventDefault();
+        laneEl.classList.remove('drop-target');
+        const rect = laneEl.getBoundingClientRect();
+        const dropX = e.clientX - rect.left;
+        const boardId = parseInt(e.dataTransfer.getData('text/board-id'), 10);
+        if (boardId && boardId !== activeBoardId) addClip(boardId, laneIdx, dropX / ARR.pxPerSec);
+      });
+
+      lane.forEach((clip) => {
+        const b = boardById(clip.boardId);
+        if (!b) return;
+        const el = document.createElement('div');
+        el.className = 'arrange-clip';
+        el.style.left = (clip.start * ARR.pxPerSec) + 'px';
+        el.style.width = Math.max(boardLen(b) * ARR.pxPerSec, 28) + 'px';
+        el.style.background = '#c5a8ff';
+        el.title = b.name + ' — ' + boardLen(b).toFixed(1) + 's';
+
+        const label = document.createElement('span');
+        label.textContent = b.name;
+        el.appendChild(label);
+
+        const x = document.createElement('button');
+        x.className = 'arrange-clip-x';
+        x.textContent = '×';
+        x.addEventListener('mousedown', (e) => e.stopPropagation());
+        x.addEventListener('click', (e) => { e.stopPropagation(); deleteClip(clip); });
+        el.appendChild(x);
+
+        // drag clip to move (time + lane) — mouse based for precision
+        el.addEventListener('mousedown', (e) => {
+          if (e.target === x) return;
+          e.preventDefault();
+          const rect = el.getBoundingClientRect();
+          arrDragClip = { clip, grabDX: e.clientX - rect.left };
+          el.classList.add('dragging');
+          window.addEventListener('mousemove', arrClipMove);
+          window.addEventListener('mouseup', arrClipUp);
+        });
+
+        laneEl.appendChild(el);
+      });
+
+      host.appendChild(laneEl);
+    });
+  }
+
+  function arrClipMove(e) {
+    if (!arrDragClip) return;
+    const host = $('arrange-lanes');
+    const lanesEls = Array.from(host.querySelectorAll('.arrange-lane'));
+    // which lane is the cursor over?
+    let targetLane = -1;
+    lanesEls.forEach((le, i) => {
+      const r = le.getBoundingClientRect();
+      if (e.clientY >= r.top && e.clientY <= r.bottom) targetLane = i;
+    });
+    const clip = arrDragClip.clip;
+
+    // new start from cursor x within whichever lane row, snapped to host steps
+    const ref = lanesEls[Math.max(0, targetLane)] || lanesEls[0];
+    if (ref) {
+      const r = ref.getBoundingClientRect();
+      clip.start = snapToHostStep((e.clientX - r.left - arrDragClip.grabDX) / ARR.pxPerSec);
+    }
+
+    // move between lanes if changed
+    if (targetLane >= 0) {
+      const cur = ARR.lanes.findIndex((l) => l.indexOf(clip) >= 0);
+      if (cur !== targetLane) {
+        ARR.lanes[cur].splice(ARR.lanes[cur].indexOf(clip), 1);
+        ARR.lanes[targetLane].push(clip);
+      }
+    }
+    renderArrange();
+  }
+
+  function arrClipUp() {
+    arrDragClip = null;
+    window.removeEventListener('mousemove', arrClipMove);
+    window.removeEventListener('mouseup', arrClipUp);
+    renderArrange();
+  }
+
+  // ---- Roll-frame drop zone (tab → canvas creates first clip) ---------------
+
+  function initRollDropZone() {
+    const frame = $('roll-frame');
+    frame.addEventListener('dragover', (e) => {
+      if (![...e.dataTransfer.types].includes('text/board-id')) return;
+      e.preventDefault();
+      frame.classList.add('drop-active');
+    });
+    frame.addEventListener('dragleave', (e) => {
+      if (!frame.contains(e.relatedTarget)) frame.classList.remove('drop-active');
+    });
+    frame.addEventListener('drop', (e) => {
+      e.preventDefault();
+      frame.classList.remove('drop-active');
+      const boardId = parseInt(e.dataTransfer.getData('text/board-id'), 10);
+      if (!boardId || boardId === activeBoardId) return;  // no self-nesting
+      showArrange(true);
+      // place at start of the first lane
+      addClip(boardId, 0, 0);
+    });
+  }
+
+  // ============================================================================
+  // Arrangement playback
+  // ============================================================================
+
+  // Fire one note (point or sustained chord) of a given board at absolute time.
+  function fireBoardNote(board, note, midi, when) {
+    const def = VOICE_DEFS[note.voice];
+    if (def.chord) def.playLen(fxInput, when, midi, Math.max(note.len, 1) * boardStepDur(board));
+    else def.play(fxInput, when, voiceParams[note.voice], midi);
+  }
+
+  // Schedule a single playthrough of `board` starting at absolute time `at`.
+  function scheduleBoard(board, at) {
+    const sd = boardStepDur(board);
+    board.notes.forEach((note, key) => {
+      const colon = key.indexOf(':');
+      const step = parseInt(key.slice(0, colon), 10);
+      const midi = parseInt(key.slice(colon + 1), 10);
+      if (step >= board.steps) return;
+      fireBoardNote(board, note, midi, at + step * sd);
+    });
+  }
+
+  // Total arrangement length in seconds.
+  function arrLength() {
+    let end = 0;
+    ARR.lanes.forEach((lane) => lane.forEach((clip) => {
+      const b = boardById(clip.boardId);
+      if (b) end = Math.max(end, clip.start + boardLen(b));
+    }));
+    return end;
+  }
+
+  function arrPlay() {
+    resume();
+    SEQ.playing = true;
+    const t0 = ctx.currentTime + 0.08;
+    SEQ.playStart = t0;
+    // Schedule every clip up-front (arrangements are short; one-shot playthrough).
+    ARR.lanes.forEach((lane) => lane.forEach((clip) => {
+      const b = boardById(clip.boardId);
+      if (b) scheduleBoard(b, t0 + clip.start);
+    }));
+    const total = arrLength();
+    SEQ.timer = setTimeout(() => { seqStop(); }, (0.08 + total + 0.5) * 1000);
+    updateSeqButton();
+    arrAnimate();
+  }
+
+  let arrRaf = null;
+  function arrAnimate() {
+    if (arrRaf) cancelAnimationFrame(arrRaf);
+    const host = $('arrange-lanes');
+    function frame() {
+      // draw a single playhead element across lanes
+      let ph = host.querySelector('.arrange-playhead');
+      if (SEQ.playing && ctx) {
+        const x = (ctx.currentTime - SEQ.playStart) * ARR.pxPerSec;
+        if (x >= 0) {
+          if (!ph) { ph = document.createElement('div'); ph.className = 'arrange-playhead'; host.appendChild(ph); }
+          ph.style.left = (x + 12) + 'px';   // +12 ~ lane left padding
+        }
+        arrRaf = requestAnimationFrame(frame);
+      } else if (ph) {
+        ph.remove();
+      }
+    }
+    frame();
   }
 
   // ---- Roll mouse interaction ----------------------------------------------
@@ -1350,6 +1646,12 @@
     // piano boards (tabs)
     renderBoardTabs();
     syncBoardSliders();
+
+    // arrangement (drag a tab onto the canvas to reveal it)
+    initRollDropZone();
+    $('btn-arr-lane').addEventListener('click', addLane);
+    $('btn-arr-clear').addEventListener('click', clearArrange);
+    renderArrange();
 
     document.addEventListener('keydown', onKeyDown);
     document.addEventListener('keyup', onKeyUp);

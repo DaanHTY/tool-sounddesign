@@ -142,9 +142,19 @@
         </div>
       </div>
 
-      <div class="roll-frame">
+      <div class="roll-frame" id="roll-frame">
         <div class="board-tabs" id="board-tabs"></div>
         <canvas id="roll"></canvas>
+        <div class="roll-drop-hint" id="roll-drop-hint">Drop to add as a clip</div>
+      </div>
+
+      <div class="arrange" id="arrange" hidden>
+        <div class="arrange-head">
+          <span class="arrange-title">Arrangement</span>
+          <button class="btn roll-btn" id="btn-arr-lane">+ Lane</button>
+          <button class="btn roll-btn" id="btn-arr-clear">Clear</button>
+        </div>
+        <div class="arrange-lanes" id="arrange-lanes"></div>
       </div>
 
       <div class="scope-frame scope-strip">

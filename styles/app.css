@@ -453,6 +453,133 @@ body {
 
 .board-add:hover { background: var(--surface-input); color: var(--text); }
 
+.board-tab[draggable="true"] { cursor: grab; }
+.board-tab.dragging { opacity: 0.5; }
+
+/* drop hint overlay on the roll canvas */
+.roll-drop-hint {
+  align-items: center;
+  background: rgba(197, 168, 255, 0.12);
+  border: 2px dashed rgba(197, 168, 255, 0.7);
+  border-radius: var(--radius);
+  color: var(--text);
+  display: none;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  inset: 0;
+  justify-content: center;
+  letter-spacing: -0.02em;
+  pointer-events: none;
+  position: absolute;
+  text-transform: uppercase;
+  z-index: 5;
+}
+
+.roll-frame.drop-active .roll-drop-hint { display: flex; }
+
+/* ---- Arrangement timeline ------------------------------------------------- */
+
+.arrange {
+  background: var(--island-bg);
+  border-radius: var(--radius);
+  clip-path: inset(0 round var(--radius));
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  max-height: 38%;
+  min-height: 120px;
+  overflow: hidden;
+}
+
+.arrange[hidden] { display: none; }
+
+.arrange-head {
+  align-items: center;
+  display: flex;
+  flex-shrink: 0;
+  gap: 12px;
+  padding: 10px 12px;
+}
+
+.arrange-title {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  letter-spacing: -0.02em;
+  margin-right: auto;
+  text-transform: uppercase;
+}
+
+.arrange-lanes {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 12px 12px;
+  position: relative;
+  scrollbar-width: thin;
+}
+
+.arrange-lane {
+  background: var(--surface);
+  border-radius: var(--radius-sm);
+  flex: 0 0 44px;
+  position: relative;
+}
+
+.arrange-lane.drop-target {
+  box-shadow: inset 0 0 0 2px rgba(197, 168, 255, 0.7);
+}
+
+.arrange-clip {
+  align-items: center;
+  border-radius: var(--radius-sm);
+  bottom: 3px;
+  color: #0d0d0d;
+  cursor: grab;
+  display: flex;
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  gap: 6px;
+  letter-spacing: -0.02em;
+  overflow: hidden;
+  padding: 0 8px;
+  position: absolute;
+  text-transform: uppercase;
+  top: 3px;
+  white-space: nowrap;
+}
+
+.arrange-clip.dragging { cursor: grabbing; opacity: 0.7; }
+
+.arrange-clip-x {
+  background: rgba(0, 0, 0, 0.25);
+  border: 0;
+  border-radius: 99px;
+  color: inherit;
+  cursor: pointer;
+  flex-shrink: 0;
+  font-size: 0.6875rem;
+  height: 16px;
+  line-height: 1;
+  opacity: 0;
+  width: 16px;
+}
+
+.arrange-clip:hover .arrange-clip-x { opacity: 1; }
+
+.arrange-playhead {
+  background: rgba(255, 255, 255, 0.85);
+  bottom: 0;
+  pointer-events: none;
+  position: absolute;
+  top: 0;
+  width: 2px;
+  z-index: 4;
+}
+
 .scope-readout {
   display: flex;
   flex-wrap: wrap;
