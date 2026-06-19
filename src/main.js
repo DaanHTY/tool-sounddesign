@@ -81,6 +81,8 @@
     tSpace: 0,
     droneOn: false,
     selectedVoice: null,
+    editingKey: null,    // 'step:midi' of the placed chord being edited, or null
+    syncing: false,      // true while pushing a snapshot into the sidebar UI
   };
 
   // ---- Web Audio nodes -----------------------------------------------------
@@ -276,19 +278,39 @@
     return dbToLin(state.gain) * Math.sqrt(state.q / 80) * STAGES;
   }
 
-  // Self-contained sustained chord, used by the sequencer / palette pad. Unlike
-  // the live drone (which shares `notes`), this spins up its own noise source +
-  // filter bank so several scheduled chords can overlap. Root pitch comes from
-  // `rootMidi`; chord type + tone come from the current sidebar settings. It
-  // sustains for `lenSec`, then releases, and cleans itself up.
-  function playChordVoice(dest, t, rootMidi, lenSec) {
+  // The per-chord sound-design settings (everything on the Palette tab incl.
+  // Chord FX). A placed chord freezes these so later slider changes don't alter
+  // it. SNAP_KEYS are copied straight from `state`.
+  const SNAP_KEYS = [
+    'chord', 'q', 'gain', 'noise', 'volume', 'attack', 'release', 'strum',
+    'drive', 'tone', 'delay', 'space',
+  ];
+  function chordSnapshot() {
+    const s = {};
+    SNAP_KEYS.forEach((k) => { s[k] = state[k]; });
+    return s;
+  }
+  const snapResoLevel = (p) => dbToLin(p.gain) * Math.sqrt(p.q / 80) * STAGES;
+
+  // Self-contained sustained chord. Spins up its own noise source, filter bank,
+  // AND its own Chord-FX chain so the settings captured at placement time are
+  // frozen. `snap` is a chordSnapshot(); when omitted, the live `state` is used
+  // (e.g. auditioning the "next" chord). The chord routes through its frozen
+  // Chord FX, then into `dest` (the master/timeline-FX bus).
+  function playChordVoice(dest, t, rootMidi, lenSec, snap) {
     if (!ctx) return;
-    const intervals = CHORDS[state.chord];
-    const level = resoLevel();
-    const atk = state.attack;
-    const rel = state.release;
+    const p = snap || chordSnapshot();
+    const intervals = CHORDS[p.chord] || CHORDS.Major;
+    const level = snapResoLevel(p);
+    const atk = p.attack;
+    const rel = p.release;
     const hold = Math.max(lenSec, 0.02);
     const tEnd = t + atk + hold + rel;
+
+    // Per-chord Chord-FX chain (frozen), feeding the timeline-FX bus.
+    const fx = makeFXChain();
+    fx.apply({ drive: p.drive, tone: p.tone, delay: p.delay, space: p.space });
+    fx.output.connect(dest);
 
     const src = ctx.createBufferSource();
     src.buffer = noiseBuf;
@@ -299,7 +321,7 @@
     bus.gain.linearRampToValueAtTime(level, t + atk);
     bus.gain.setValueAtTime(level, t + atk + hold);
     bus.gain.linearRampToValueAtTime(0.0001, tEnd);
-    bus.connect(dest);
+    bus.connect(fx.input);
 
     intervals.forEach((iv, i) => {
       const freq = midiToFreq(rootMidi + iv);
@@ -308,15 +330,15 @@
         const f = ctx.createBiquadFilter();
         f.type = 'bandpass';
         f.frequency.value = freq;
-        f.Q.value = state.q;
+        f.Q.value = p.q;
         node.connect(f);
         node = f;
       }
       // optional strum: stagger note entries within the chord's own sub-gain
-      if (state.strum > 0) {
+      if (p.strum > 0) {
         const ng = ctx.createGain();
         ng.gain.setValueAtTime(0.0001, t);
-        ng.gain.linearRampToValueAtTime(1, t + i * state.strum + 0.001);
+        ng.gain.linearRampToValueAtTime(1, t + i * p.strum + 0.001);
         node.connect(ng);
         ng.connect(bus);
       } else {
@@ -326,6 +348,10 @@
 
     src.start(t);
     src.stop(tEnd + 0.05);
+    // Tear down the per-chord FX chain a bit after the tail (delay/reverb) ends.
+    const tail = tEnd + 2.5;
+    setTimeout(() => { try { fx.output.disconnect(); } catch (e) {} },
+               Math.max((tail - ctx.currentTime) * 1000, 100));
   }
 
   function rebuildFilters() {
@@ -434,12 +460,15 @@
     Chord: {
       chord: true,
       params: [],
-      play(dest, t, p, midi) {
+      // dest is the master/timeline-FX bus; `snap` is the note's frozen
+      // settings (omit to use live state, e.g. auditioning the next chord).
+      play(dest, t, p, midi, snap) {
         const root = midi != null ? midi : baseMidi();
-        playChordVoice(dest, t, root, Math.max(state.attack + 0.12, 0.18));
+        const atk = (snap || state).attack;
+        playChordVoice(dest, t, root, Math.max(atk + 0.12, 0.18), snap);
       },
-      playLen(dest, t, midi, lenSec) {
-        playChordVoice(dest, t, midi != null ? midi : baseMidi(), lenSec);
+      playLen(dest, t, midi, lenSec, snap) {
+        playChordVoice(dest, t, midi != null ? midi : baseMidi(), lenSec, snap);
       },
     },
   };
@@ -453,7 +482,9 @@
 
   function trigger(name) {
     resume();
-    VOICE_DEFS[name].play(fxInput, ctx.currentTime + 0.001, voiceParams[name]);
+    const def = VOICE_DEFS[name];
+    const dest = def.chord ? masterSum : fxInput;
+    def.play(dest, ctx.currentTime + 0.001, voiceParams[name]);
     flashPad(name);
   }
 
@@ -576,6 +607,7 @@
       if (noiseSource) rebuildFilters();
       if (state.droneOn) chordOn();
       updateReadout();
+      mirrorToEditing();
     });
   }
 
@@ -759,7 +791,8 @@
     return { x, y, midi, step, inGutter: x < g.gut, inRange: midi >= SEQ.low && midi <= SEQ.high };
   }
 
-  // Each entry: key 'step:midi' -> { voice, len } (len in steps, ≥1).
+  // Each entry: key 'step:midi' -> { voice, len, fx } (len in steps, ≥1;
+  // fx = frozen chord settings captured when placed).
   function seqTriggerStep(step, when) {
     SEQ.notes.forEach((note, key) => {
       const colon = key.indexOf(':');
@@ -767,7 +800,7 @@
       const midi = parseInt(key.slice(colon + 1), 10);
       const def = VOICE_DEFS[note.voice];
       if (def.chord) {
-        def.playLen(fxInput, when, midi, Math.max(note.len, 1) * stepDur());
+        def.playLen(masterSum, when, midi, Math.max(note.len, 1) * stepDur(), note.fx);
       } else {
         def.play(fxInput, when, voiceParams[note.voice], midi);
       }
@@ -835,6 +868,7 @@
   function switchBoard(id) {
     if (id === activeBoardId) return;
     if (SEQ.playing) seqStop();    // playback follows the visible board
+    state.editingKey = null;       // selection doesn't carry across boards
     activeBoardId = id;
     syncBoardSliders();
     renderBoardTabs();
@@ -863,6 +897,7 @@
     }));
     if (activeBoardId === id) {
       if (SEQ.playing) seqStop();
+      state.editingKey = null;
       activeBoardId = BOARDS[Math.max(0, i - 1)].id;
       syncBoardSliders();
     }
@@ -1174,7 +1209,7 @@
     if (def.chord) {
       let len = Math.max(note.len, 1) * boardStepDur(board);
       if (loopEnd != null) len = Math.min(len, loopEnd - when);   // clamp sustain
-      if (len > 0.001) def.playLen(fxInput, when, midi, len);
+      if (len > 0.001) def.playLen(masterSum, when, midi, len, note.fx);
     } else {
       def.play(fxInput, when, voiceParams[note.voice], midi);
     }
@@ -1259,11 +1294,13 @@
 
   // ---- Roll mouse interaction ----------------------------------------------
   //
-  // Tap an empty cell to add a 1-step note; tap an existing note to remove it.
-  // Drag the right edge to extend a note rightward, or the left edge to extend
-  // it leftward (its start step moves). Gutter clicks audition the pitch.
+  // Click empty cell  → add a 1-step note (not auto-selected).
+  // Single click note → select it (loads its settings into the sidebar).
+  // Double click note → delete it.
+  // Drag the first/last step of a note → resize that side; drag the middle → move.
+  // Gutter click      → audition the pitch.
 
-  let drag = null;   // { key, midi, edge, anchorStep|endStep, moved, wasExisting }
+  let drag = null;             // active drag descriptor (see rollDown)
 
   // Find the note whose span covers (step, midi), returning its anchor key.
   function noteCovering(step, midi) {
@@ -1276,11 +1313,75 @@
     return null;
   }
 
-  function auditionVoice(voice, midi) {
+  // Move/re-key a note to a new (startStep, midi), keeping its data. Returns the
+  // new key (or the old one if the target is unchanged/occupied by another note).
+  function moveNote(oldKey, newStart, newMidi) {
+    newStart = Math.max(0, Math.min(newStart, SEQ.steps - 1));
+    const newKey = newStart + ':' + newMidi;
+    if (newKey === oldKey) return oldKey;
+    const note = SEQ.notes.get(oldKey);
+    if (!note) return oldKey;
+    // don't clobber a different existing note
+    if (SEQ.notes.has(newKey)) return oldKey;
+    if (newStart + note.len > SEQ.steps) note.len = SEQ.steps - newStart;
+    SEQ.notes.delete(oldKey);
+    SEQ.notes.set(newKey, note);
+    if (state.editingKey === oldKey) state.editingKey = newKey;
+    return newKey;
+  }
+
+  // `snap` (optional) is a frozen chord settings object; omit for live state.
+  function auditionVoice(voice, midi, snap) {
     resume();
     const def = VOICE_DEFS[voice];
-    if (def.chord) def.playLen(fxInput, ctx.currentTime + 0.001, midi, Math.max(state.attack + 0.2, 0.3));
+    const atk = (snap || state).attack;
+    if (def.chord) def.playLen(masterSum, ctx.currentTime + 0.001, midi, Math.max(atk + 0.2, 0.3), snap);
     else def.play(fxInput, ctx.currentTime + 0.001, voiceParams[voice], midi);
+  }
+
+  // ---- Per-chord settings: select + edit ------------------------------------
+
+  // Push a snapshot's values into the Palette-tab sliders / chord select so the
+  // sidebar shows the selected (or default) chord's frozen settings.
+  function syncPaletteFromSnapshot(p) {
+    state.syncing = true;
+    const set = (id, v) => { const el = $(id); if (el) { el.value = v; el.dispatchEvent(new Event('input')); } };
+    set('s-q', p.q);
+    set('s-gain', p.gain);
+    set('s-noise', Math.round(p.noise * 100));
+    set('s-vol', Math.round(p.volume * 100));
+    set('s-attack', Math.round(p.attack * 1000));
+    set('s-release', Math.round(p.release * 1000));
+    set('s-strum', Math.round(p.strum * 1000));
+    set('s-drive', p.drive);
+    set('s-tone', p.tone);
+    set('s-delay', p.delay);
+    set('s-space', p.space);
+    const sel = $('chord-select');
+    if (sel) { sel.value = p.chord; sel.dispatchEvent(new Event('change')); }
+    state.syncing = false;
+  }
+
+  // Select a placed chord for editing: load its frozen settings into `state`
+  // and reflect them in the sidebar. Sidebar edits then mirror back to it.
+  function selectPlacedNote(key) {
+    const note = SEQ.notes.get(key);
+    if (!note || !note.fx) { state.editingKey = null; return; }
+    state.editingKey = key;
+    SNAP_KEYS.forEach((k) => { state[k] = note.fx[k]; });
+    syncPaletteFromSnapshot(note.fx);
+    applyLiveParams();
+    applyFX();
+    updateReadout();
+  }
+
+  // Mirror the current Palette-tab settings into the selected chord (so editing
+  // a slider changes that placed chord, not future placements). No-op while
+  // loading a snapshot, or when nothing is selected.
+  function mirrorToEditing() {
+    if (state.syncing || !state.editingKey) return;
+    const note = SEQ.notes.get(state.editingKey);
+    if (note) note.fx = chordSnapshot();
   }
 
   function rollDown(e) {
@@ -1293,23 +1394,43 @@
 
     const existing = noteCovering(c.step, c.midi);
     if (existing) {
-      // Resize: grabbing the FIRST step of a multi-step note resizes its left
-      // edge (start moves); otherwise resize the right edge (length grows).
-      const startStep = parseInt(existing.slice(0, existing.indexOf(':')), 10);
       const note = SEQ.notes.get(existing);
-      const grabLeftEdge = note.len > 1 && c.step === startStep;
-      if (grabLeftEdge) {
-        drag = { key: existing, midi: c.midi, edge: 'left',
-                 endStep: startStep + note.len - 1, moved: false, wasExisting: true };
+      const geo = rollGeom(canvas);
+      const startStep = parseInt(existing.slice(0, existing.indexOf(':')), 10);
+      const noteLeftPx = geo.gut + startStep * geo.stepW;
+      const noteWidthPx = note.len * geo.stepW;
+      const into = c.x - noteLeftPx;                  // px from the note's left edge
+      // Resize zones = one step at each edge (the middle moves). For a 1-step
+      // note there's no middle, so split it 50/50 between the two edges.
+      let nearLeft, nearRight;
+      if (note.len === 1) {
+        nearLeft = into <= noteWidthPx / 2;
+        nearRight = !nearLeft;
       } else {
-        drag = { key: existing, midi: c.midi, edge: 'right',
-                 anchorStep: startStep, moved: false, wasExisting: true };
+        nearLeft = into <= geo.stepW;
+        nearRight = into >= noteWidthPx - geo.stepW;
+      }
+
+      if (nearLeft && note.len >= 1) {
+        drag = { mode: 'left', key: existing, midi: c.midi,
+                 endStep: startStep + note.len - 1, moved: false };
+      } else if (nearRight) {
+        drag = { mode: 'right', key: existing, midi: c.midi,
+                 anchorStep: startStep, moved: false };
+      } else {
+        // body grab → move; remember grab offset so the note doesn't jump
+        drag = { mode: 'move', key: existing, grabStepOff: c.step - startStep,
+                 moved: false };
       }
     } else {
+      // New chord: freeze current Palette settings. NOT auto-selected, and
+      // placing clears any prior selection so the sidebar edits "next" defaults.
       const key = c.step + ':' + c.midi;
-      SEQ.notes.set(key, { voice, len: 1 });
-      drag = { key, midi: c.midi, edge: 'right', anchorStep: c.step, moved: false, wasExisting: false };
-      auditionVoice(voice, c.midi);
+      const note = { voice, len: 1, fx: chordSnapshot() };
+      SEQ.notes.set(key, note);
+      state.editingKey = null;
+      drag = { mode: 'right', key, midi: c.midi, anchorStep: c.step, moved: false, isNew: true };
+      auditionVoice(voice, c.midi, note.fx);
     }
     window.addEventListener('mousemove', rollMove);
     window.addEventListener('mouseup', rollUp);
@@ -1321,9 +1442,8 @@
     const c = cellAt(canvas, e.clientX, e.clientY);
     if (c.step < 0 || c.step >= SEQ.steps) return;
 
-    if (drag.edge === 'left') {
-      // Left edge follows the cursor; end step stays fixed. Start changes the
-      // note's key, so re-key it in the Map.
+    if (drag.mode === 'left') {
+      // Left edge follows cursor; end step fixed. Re-keys the note.
       const newStart = Math.min(c.step, drag.endStep);
       const oldStart = parseInt(drag.key.slice(0, drag.key.indexOf(':')), 10);
       if (newStart !== oldStart) {
@@ -1332,24 +1452,45 @@
         note.len = drag.endStep - newStart + 1;
         const newKey = newStart + ':' + drag.midi;
         SEQ.notes.set(newKey, note);
+        if (state.editingKey === drag.key) state.editingKey = newKey;
         drag.key = newKey;
         drag.moved = true;
       }
-    } else {
+    } else if (drag.mode === 'right') {
       const len = Math.max(1, c.step - drag.anchorStep + 1);
       const note = SEQ.notes.get(drag.key);
       if (note && note.len !== len) { note.len = len; drag.moved = true; }
+    } else if (drag.mode === 'move') {
+      if (!c.inRange) return;       // keep within the pitch range
+      const newStart = c.step - drag.grabStepOff;
+      const oldStart = parseInt(drag.key.slice(0, drag.key.indexOf(':')), 10);
+      const oldMidi = parseInt(drag.key.slice(drag.key.indexOf(':') + 1), 10);
+      if (newStart !== oldStart || c.midi !== oldMidi) {
+        const newKey = moveNote(drag.key, newStart, c.midi);
+        if (newKey !== drag.key) { drag.key = newKey; drag.moved = true; }
+      }
     }
   }
 
   function rollUp() {
-    // Tap (no drag) on an existing note removes it.
-    if (drag && !drag.moved && drag.wasExisting) {
-      SEQ.notes.delete(drag.key);
+    // A click with no drag = SELECT the note (delete is on dblclick).
+    if (drag && !drag.moved && !drag.isNew) {
+      selectPlacedNote(drag.key);
     }
     drag = null;
     window.removeEventListener('mousemove', rollMove);
     window.removeEventListener('mouseup', rollUp);
+  }
+
+  // Double-click a note to delete it.
+  function rollDblClick(e) {
+    const canvas = $('roll');
+    const c = cellAt(canvas, e.clientX, e.clientY);
+    if (c.inGutter || !c.inRange) return;
+    const key = noteCovering(c.step, c.midi);
+    if (!key) return;
+    SEQ.notes.delete(key);
+    if (state.editingKey === key) state.editingKey = null;
   }
 
   // ---- Roll drawing ---------------------------------------------------------
@@ -1417,6 +1558,14 @@
             g.beginPath(); g.moveTo(sx, y + 1); g.lineTo(sx, y + hh); g.stroke();
           }
         }
+        // outline the chord currently selected for editing
+        if (key === state.editingKey) {
+          g.strokeStyle = '#ffffff';
+          g.lineWidth = 2;
+          g.beginPath();
+          g.roundRect ? g.roundRect(x + 1, y + 1, w, hh, r) : g.rect(x + 1, y + 1, w, hh);
+          g.stroke();
+        }
       });
 
       // playhead
@@ -1440,21 +1589,21 @@
   function init() {
     buildControls();
 
-    bindSlider('s-q', 'v-q', (n) => { state.q = n; applyLiveParams(); });
-    bindSlider('s-gain', 'v-gain', (n) => { state.gain = n; applyLiveParams(); }, (n) => n + 'dB');
-    bindSlider('s-noise', 'v-noise', (n) => { state.noise = n / 100; applyLiveParams(); });
-    bindSlider('s-vol', 'v-vol', (n) => { state.volume = n / 100; applyLiveParams(); });
-    bindSlider('s-attack', 'v-attack', (n) => { state.attack = n / 1000; }, (n) => n + 'ms');
-    bindSlider('s-release', 'v-release', (n) => { state.release = n / 1000; }, (n) => n + 'ms');
-    bindSlider('s-strum', 'v-strum', (n) => { state.strum = n / 1000; }, (n) => n + 'ms');
+    bindSlider('s-q', 'v-q', (n) => { state.q = n; applyLiveParams(); mirrorToEditing(); });
+    bindSlider('s-gain', 'v-gain', (n) => { state.gain = n; applyLiveParams(); mirrorToEditing(); }, (n) => n + 'dB');
+    bindSlider('s-noise', 'v-noise', (n) => { state.noise = n / 100; applyLiveParams(); mirrorToEditing(); });
+    bindSlider('s-vol', 'v-vol', (n) => { state.volume = n / 100; applyLiveParams(); mirrorToEditing(); });
+    bindSlider('s-attack', 'v-attack', (n) => { state.attack = n / 1000; mirrorToEditing(); }, (n) => n + 'ms');
+    bindSlider('s-release', 'v-release', (n) => { state.release = n / 1000; mirrorToEditing(); }, (n) => n + 'ms');
+    bindSlider('s-strum', 'v-strum', (n) => { state.strum = n / 1000; mirrorToEditing(); }, (n) => n + 'ms');
 
     const fHzShort = (n) => (n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k' : n);
 
-    // Chord FX — per-chord-voice
-    bindSlider('s-drive', 'v-drive', (n) => { state.drive = n; applyFX(); });
-    bindSlider('s-tone', 'v-tone', (n) => { state.tone = n; applyFX(); }, fHzShort);
-    bindSlider('s-delay', 'v-delay', (n) => { state.delay = n; applyFX(); });
-    bindSlider('s-space', 'v-space', (n) => { state.space = n; applyFX(); });
+    // Chord FX — per-chord-voice (frozen onto the chord when placed/edited)
+    bindSlider('s-drive', 'v-drive', (n) => { state.drive = n; applyFX(); mirrorToEditing(); });
+    bindSlider('s-tone', 'v-tone', (n) => { state.tone = n; applyFX(); mirrorToEditing(); }, fHzShort);
+    bindSlider('s-delay', 'v-delay', (n) => { state.delay = n; applyFX(); mirrorToEditing(); });
+    bindSlider('s-space', 'v-space', (n) => { state.space = n; applyFX(); mirrorToEditing(); });
 
     // Timeline FX — master bus
     bindSlider('s-tdrive', 'v-tdrive', (n) => { state.tDrive = n; applyFX(); });
@@ -1474,10 +1623,11 @@
 
     // sequencer transport
     $('btn-seq').addEventListener('click', toggleSeq);
-    $('btn-clear').addEventListener('click', () => SEQ.notes.clear());
+    $('btn-clear').addEventListener('click', () => { SEQ.notes.clear(); state.editingKey = null; });
     bindSlider('s-bpm', 'v-bpm', (n) => { SEQ.bpm = n; if (!$('arrange').hidden) renderArrange(); });
     bindSlider('s-steps', 'v-steps', (n) => { setSteps(n); if (!$('arrange').hidden) renderArrange(); });
     $('roll').addEventListener('mousedown', rollDown);
+    $('roll').addEventListener('dblclick', rollDblClick);
 
     // piano boards (tabs)
     renderBoardTabs();
