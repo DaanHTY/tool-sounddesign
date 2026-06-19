@@ -59,6 +59,7 @@
   // Shared slider value formatters (used by FX_DEFS params).
   const fHz = (n) => (n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k' : Math.round(n)) + 'Hz';
   const pct = (n) => n + '%';
+  const gainDb = (n) => (n > 0 ? '+' : '') + n + 'dB';
 
   // ---- State ---------------------------------------------------------------
 
@@ -127,7 +128,7 @@
   const PITCH_WORKLET_SRC = `
     class PitchShifter extends AudioWorkletProcessor {
       static get parameterDescriptors() {
-        return [{ name: 'ratio', defaultValue: 1, minValue: 0.25, maxValue: 4,
+        return [{ name: 'ratio', defaultValue: 1, minValue: 0.2, maxValue: 4.2,
                   automationRate: 'k-rate' }];
       }
       constructor() {
@@ -219,26 +220,72 @@
     return buffer;
   }
 
-  function makeDriveCurve(amount, kind) {
-    const k = (amount / 100) * 40;
-    const n = 1024;
+  // The transfer functions behind the Distortion effect. `x` is the input
+  // sample in [-1,1] (already pre-gained by Drive in the audio graph), `bias`
+  // is the DC offset that introduces asymmetry → even harmonics.
+  function shaperFn(kind, x, bias) {
+    const xb = x + bias;
+    let y;
+    switch (kind) {
+      case 'tube':
+        // asymmetric soft saturation — warm, tube-like even harmonics
+        y = xb >= 0 ? Math.tanh(xb) : Math.tanh(xb * 0.7) * 0.85;
+        break;
+      case 'hard':
+        // hard clip with slightly rounded knee
+        y = Math.max(-1, Math.min(1, xb * 1.4));
+        break;
+      case 'fold':
+        // wavefolder — reflects back when it exceeds ±1, rich upper harmonics
+        y = Math.sin(xb * Math.PI * 0.5);
+        if (Math.abs(xb) > 1) {
+          let f = xb;
+          while (Math.abs(f) > 1) f = (f > 0 ? 2 : -2) - f;
+          y = Math.sin(f * Math.PI * 0.5);
+        }
+        break;
+      case 'fuzz':
+        // aggressive: heavily saturated then hard-clipped for square-ish edges
+        y = Math.tanh(xb * 3);
+        y = Math.max(-0.9, Math.min(0.9, y * 1.3));
+        break;
+      case 'soft':
+      default:
+        // classic smooth saturation
+        y = Math.tanh(xb);
+        break;
+    }
+    // remove the DC the bias introduced so we don't shift the whole signal
+    return y - (bias !== 0 ? shaperBaseline(kind, bias) : 0);
+  }
+
+  // The shaper output at x=0 for a given bias — subtracted to re-center.
+  function shaperBaseline(kind, bias) {
+    switch (kind) {
+      case 'tube':  return bias >= 0 ? Math.tanh(bias) : Math.tanh(bias * 0.7) * 0.85;
+      case 'hard':  return Math.max(-1, Math.min(1, bias * 1.4));
+      case 'fold':  return Math.sin(bias * Math.PI * 0.5);
+      case 'fuzz':  return Math.max(-0.9, Math.min(0.9, Math.tanh(bias * 3) * 1.3));
+      default:      return Math.tanh(bias);
+    }
+  }
+
+  // Build a WaveShaper curve for `kind` with `bias` asymmetry. Drive is applied
+  // as real pre-gain in the graph (not baked here), so the curve is just the
+  // normalized nonlinearity sampled across the input range.
+  function makeShaperCurve(kind, drive, bias) {
+    const n = 2048;
     const curve = new Float32Array(n);
+    const b = (bias / 100) * 0.6;            // bias param 0..100 → ~0..0.6 offset
     for (let i = 0; i < n; i++) {
       const x = (i / (n - 1)) * 2 - 1;
-      if (kind === 'fuzz') {
-        // hard-ish asymmetric clip for aggressive grit
-        const y = (1 + k) * x / (1 + k * Math.abs(x));
-        curve[i] = Math.tanh(y * (1 + k * 0.15));
-      } else if (kind === 'tube') {
-        // soft, even-harmonic warmth
-        curve[i] = Math.tanh(x * (1 + k * 0.6));
-      } else {
-        // classic soft clip
-        curve[i] = (1 + k) * x / (1 + k * Math.abs(x));
-      }
+      curve[i] = Math.max(-1, Math.min(1, shaperFn(kind, x, b)));
     }
     return curve;
   }
+
+  const SHAPER_KINDS = ['soft', 'tube', 'hard', 'fold', 'fuzz'];
+  const SHAPER_LABELS = ['Soft', 'Tube', 'Hard', 'Fold', 'Fuzz'];
 
   // ---- EQ visualization -----------------------------------------------------
   //
@@ -304,8 +351,7 @@
 
   function eqVisual(body, inst, which, syncSliders) {
     const fs = (ctx && ctx.sampleRate) || 48000;
-    const def = FX_DEFS.eq;
-    const W = 252, H = 132;
+    const W = 252, H = 150;
     const DB = 18;                         // vertical range ±dB
     const FMIN = 20, FMAX = 20000;
     const logMin = Math.log10(FMIN), logMax = Math.log10(FMAX);
@@ -322,18 +368,31 @@
     const fForX = (x) => Math.pow(10, logMin + (x / W) * (logMax - logMin));
     const yForDb = (db) => H / 2 - (db / DB) * (H / 2);
     const dbForY = (y) => -((y - H / 2) / (H / 2)) * DB;
+    const clampDb = (d) => Math.max(-DB, Math.min(DB, d));
 
-    // The three draggable bands. Low/high shelves have fixed frequency.
+    // Draggable bands. `q` (optional) is the param key for a peak's Q (wheel).
     const bands = [
-      { key: 'low',  freq: () => def.lowFreq,  movableF: false, gainK: 'low' },
-      { key: 'mid',  freq: () => inst.params.midFreq, movableF: true, gainK: 'mid', fK: 'midFreq', fMin: 200, fMax: 8000 },
-      { key: 'high', freq: () => def.highFreq, movableF: false, gainK: 'high' },
+      { key: 'LS', type: 'lowshelf', fK: 'lowFreq',  gK: 'lowGain',  fMin: 40,  fMax: 600 },
+      { key: 'M1', type: 'peak',     fK: 'mid1Freq', gK: 'mid1Gain', qK: 'mid1Q', fMin: 100, fMax: 4000 },
+      { key: 'M2', type: 'peak',     fK: 'mid2Freq', gK: 'mid2Gain', qK: 'mid2Q', fMin: 800, fMax: 12000 },
+      { key: 'HS', type: 'highshelf', fK: 'highFreq', gK: 'highGain', fMin: 2000, fMax: 16000 },
     ];
 
+    // First-order roll-off (dB) for the HP/LP cuts at frequency f.
+    function cutDb(f) {
+      let db = 0;
+      const hp = inst.params.hpFreq, lp = inst.params.lpFreq;
+      if (hp > 20) db += -10 * Math.log10(1 + Math.pow(hp / f, 2));        // HP
+      if (lp < 20000) db += -10 * Math.log10(1 + Math.pow(f / lp, 2));     // LP
+      return db;
+    }
     function totalDb(f) {
-      return biquadShelfDb('low', f, def.lowFreq, inst.params.low, fs)
-        + biquadPeakDb(f, inst.params.midFreq, inst.params.mid, 1, fs)
-        + biquadShelfDb('high', f, def.highFreq, inst.params.high, fs);
+      const p = inst.params;
+      return cutDb(f)
+        + biquadShelfDb('low', f, p.lowFreq, p.lowGain, fs)
+        + biquadPeakDb(f, p.mid1Freq, p.mid1Gain, p.mid1Q, fs)
+        + biquadPeakDb(f, p.mid2Freq, p.mid2Gain, p.mid2Q, fs)
+        + biquadShelfDb('high', f, p.highFreq, p.highGain, fs);
     }
 
     function draw() {
@@ -341,7 +400,6 @@
       g.setTransform(2, 0, 0, 2, 0, 0);
       g.clearRect(0, 0, W, H);
 
-      // grid: 0 dB line + decade verticals
       g.strokeStyle = 'rgba(255,255,255,0.18)';
       g.lineWidth = 1;
       g.beginPath(); g.moveTo(0, H / 2); g.lineTo(W, H / 2); g.stroke();
@@ -351,44 +409,39 @@
         g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H); g.stroke();
       });
 
-      // response curve
       g.beginPath();
       for (let px = 0; px <= W; px++) {
-        const f = fForX(px);
-        const y = yForDb(Math.max(-DB, Math.min(DB, totalDb(f))));
+        const y = yForDb(clampDb(totalDb(fForX(px))));
         if (px === 0) g.moveTo(px, y); else g.lineTo(px, y);
       }
       g.strokeStyle = '#c5a8ff';
       g.lineWidth = 1.6;
       g.stroke();
-      // soft fill under the curve
       g.lineTo(W, H / 2); g.lineTo(0, H / 2); g.closePath();
       g.fillStyle = 'rgba(197,168,255,0.10)';
       g.fill();
 
-      // band handles
       bands.forEach((b) => {
-        const x = xForF(b.freq());
-        const y = yForDb(Math.max(-DB, Math.min(DB, inst.params[b.gainK])));
+        const x = xForF(inst.params[b.fK]);
+        const y = yForDb(clampDb(inst.params[b.gK]));
         g.beginPath(); g.arc(x, y, 5, 0, Math.PI * 2);
         g.fillStyle = '#ffffff'; g.fill();
         g.fillStyle = 'rgba(255,255,255,0.55)';
         g.font = "8px 'Suisse Intl Mono', monospace";
-        g.fillText(b.key.toUpperCase(), x - 7, y - 8);
+        g.fillText(b.key, x - 6, y - 8);
       });
     }
 
-    // pointer dragging on the canvas
     let activeBand = null;
     const localXY = (e) => {
       const r = canvas.getBoundingClientRect();
       return { x: e.clientX - r.left, y: e.clientY - r.top };
     };
     function pickBand(x, y) {
-      let best = null, bestD = 18;
+      let best = null, bestD = 20;
       bands.forEach((b) => {
-        const bx = xForF(b.freq());
-        const by = yForDb(Math.max(-DB, Math.min(DB, inst.params[b.gainK])));
+        const bx = xForF(inst.params[b.fK]);
+        const by = yForDb(clampDb(inst.params[b.gK]));
         const d = Math.hypot(bx - x, by - y);
         if (d < bestD) { bestD = d; best = b; }
       });
@@ -397,7 +450,8 @@
     canvas.addEventListener('mousedown', (e) => {
       e.preventDefault();
       const { x, y } = localXY(e);
-      activeBand = pickBand(x, y) || bands[1];   // default grab = mid
+      activeBand = pickBand(x, y);
+      if (!activeBand) return;
       onDrag(e);
       window.addEventListener('mousemove', onDrag);
       window.addEventListener('mouseup', onUp);
@@ -405,11 +459,10 @@
     function onDrag(e) {
       if (!activeBand) return;
       const { x, y } = localXY(e);
-      inst.params[activeBand.gainK] = Math.round(Math.max(-DB, Math.min(DB, dbForY(y))) * 2) / 2;
-      if (activeBand.movableF) {
-        const f = Math.max(activeBand.fMin, Math.min(activeBand.fMax, fForX(Math.max(0, Math.min(W, x)))));
-        inst.params[activeBand.fK] = Math.round(f / 50) * 50;
-      }
+      const b = activeBand;
+      inst.params[b.gK] = Math.round(clampDb(dbForY(y)) * 2) / 2;
+      const f = Math.max(b.fMin, Math.min(b.fMax, fForX(Math.max(0, Math.min(W, x)))));
+      inst.params[b.fK] = Math.round(f / 10) * 10;
       rackParamChanged(which);
       syncSliders();
       draw();
@@ -419,8 +472,74 @@
       window.removeEventListener('mousemove', onDrag);
       window.removeEventListener('mouseup', onUp);
     }
+    // scroll over a peak band to change its Q
+    canvas.addEventListener('wheel', (e) => {
+      const { x, y } = localXY(e);
+      const b = pickBand(x, y);
+      if (!b || !b.qK) return;
+      e.preventDefault();
+      const q = Math.max(0.2, Math.min(8, inst.params[b.qK] + (e.deltaY < 0 ? 0.2 : -0.2)));
+      inst.params[b.qK] = Math.round(q * 10) / 10;
+      rackParamChanged(which);
+      syncSliders();
+      draw();
+    }, { passive: false });
 
-    // keep the graph live if sliders move it
+    body.parentElement._syncVisual = draw;
+    draw();
+  }
+
+  // ---- Distortion transfer-curve visualization ------------------------------
+  //
+  // Draws the saturator's input→output transfer function (the WaveShaper curve
+  // with Drive applied as horizontal input gain), so Type / Drive / Bias are
+  // visible at a glance. Read-only — shaping is via the sliders below.
+
+  function distortionVisual(body, inst, which, syncSliders) {
+    const W = 252, H = 132;
+    const wrap = document.createElement('div');
+    wrap.className = 'eq-graph';
+    const canvas = document.createElement('canvas');
+    canvas.width = W * 2; canvas.height = H * 2;
+    canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+    wrap.appendChild(canvas);
+    body.insertBefore(wrap, body.firstChild);
+
+    function draw() {
+      const g = canvas.getContext('2d');
+      g.setTransform(2, 0, 0, 2, 0, 0);
+      g.clearRect(0, 0, W, H);
+
+      // axes (input x, output y), origin centered
+      g.strokeStyle = 'rgba(255,255,255,0.18)';
+      g.lineWidth = 1;
+      g.beginPath(); g.moveTo(0, H / 2); g.lineTo(W, H / 2); g.stroke();
+      g.beginPath(); g.moveTo(W / 2, 0); g.lineTo(W / 2, H); g.stroke();
+      // unity diagonal reference
+      g.strokeStyle = 'rgba(255,255,255,0.07)';
+      g.beginPath(); g.moveTo(0, H); g.lineTo(W, 0); g.stroke();
+
+      const kind = SHAPER_KINDS[inst.params.character] || 'soft';
+      const bias = (inst.params.bias / 100) * 0.6;
+      const preGain = dbToLin((inst.params.drive / 100) * 30);
+
+      g.beginPath();
+      for (let px = 0; px <= W; px++) {
+        const x = (px / W) * 2 - 1;          // input −1..1
+        let y = shaperFn(kind, x * preGain, bias);
+        y = Math.max(-1, Math.min(1, y));
+        const py = H / 2 - y * (H / 2);
+        if (px === 0) g.moveTo(px, py); else g.lineTo(px, py);
+      }
+      g.strokeStyle = '#c5a8ff';
+      g.lineWidth = 1.8;
+      g.stroke();
+
+      g.fillStyle = 'rgba(255,255,255,0.4)';
+      g.font = "8px 'Suisse Intl Mono', monospace";
+      g.fillText((SHAPER_LABELS[inst.params.character] || 'Soft').toUpperCase(), 6, 12);
+    }
+
     body.parentElement._syncVisual = draw;
     draw();
   }
@@ -534,70 +653,112 @@
 
     eq: {
       label: 'EQ',
+      // Full parametric EQ: high-pass, low shelf, two sweepable peaks, high
+      // shelf, low-pass. Each band has freq + gain (+ Q for the peaks). The
+      // visual lets you drag bands directly; sliders fine-tune.
       params: [
-        { k: 'low',     label: 'Low',     min: -18, max: 18,   step: 0.5, def: 0,    fmt: (n) => (n > 0 ? '+' : '') + n + 'dB' },
-        { k: 'mid',     label: 'Mid',     min: -18, max: 18,   step: 0.5, def: 0,    fmt: (n) => (n > 0 ? '+' : '') + n + 'dB' },
-        { k: 'midFreq', label: 'Mid Freq', min: 200, max: 8000, step: 50, def: 1200, fmt: fHz },
-        { k: 'high',    label: 'High',    min: -18, max: 18,   step: 0.5, def: 0,    fmt: (n) => (n > 0 ? '+' : '') + n + 'dB' },
+        { group: 'Filters' },
+        { k: 'hpFreq',  label: 'HP Freq',  min: 20,  max: 2000, step: 10, def: 20,  fmt: fHz },
+        { k: 'lpFreq',  label: 'LP Freq',  min: 1000, max: 20000, step: 100, def: 20000, fmt: fHz },
+        { group: 'Low Shelf' },
+        { k: 'lowGain', label: 'Gain',     min: -18, max: 18,  step: 0.5, def: 0, fmt: gainDb },
+        { k: 'lowFreq', label: 'Freq',     min: 40,  max: 600, step: 10,  def: 120, fmt: fHz },
+        { group: 'Mid 1' },
+        { k: 'mid1Gain', label: 'Gain',    min: -18, max: 18,  step: 0.5, def: 0, fmt: gainDb },
+        { k: 'mid1Freq', label: 'Freq',    min: 100, max: 4000, step: 20, def: 500, fmt: fHz },
+        { k: 'mid1Q',    label: 'Q',       min: 0.2, max: 8,   step: 0.1, def: 1, fmt: (n) => n.toFixed(1) },
+        { group: 'Mid 2' },
+        { k: 'mid2Gain', label: 'Gain',    min: -18, max: 18,  step: 0.5, def: 0, fmt: gainDb },
+        { k: 'mid2Freq', label: 'Freq',    min: 800, max: 12000, step: 50, def: 3000, fmt: fHz },
+        { k: 'mid2Q',    label: 'Q',       min: 0.2, max: 8,   step: 0.1, def: 1, fmt: (n) => n.toFixed(1) },
+        { group: 'High Shelf' },
+        { k: 'highGain', label: 'Gain',    min: -18, max: 18,  step: 0.5, def: 0, fmt: gainDb },
+        { k: 'highFreq', label: 'Freq',    min: 2000, max: 16000, step: 100, def: 6000, fmt: fHz },
       ],
       build() {
         const input = ctx.createGain();
         const output = ctx.createGain();
-        const low = ctx.createBiquadFilter();
-        low.type = 'lowshelf'; low.frequency.value = 250;
-        const mid = ctx.createBiquadFilter();
-        mid.type = 'peaking'; mid.Q.value = 1;
-        const high = ctx.createBiquadFilter();
-        high.type = 'highshelf'; high.frequency.value = 4000;
-        input.connect(low); low.connect(mid); mid.connect(high); high.connect(output);
+        const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.Q.value = 0.7;
+        const low = ctx.createBiquadFilter(); low.type = 'lowshelf';
+        const m1 = ctx.createBiquadFilter(); m1.type = 'peaking';
+        const m2 = ctx.createBiquadFilter(); m2.type = 'peaking';
+        const high = ctx.createBiquadFilter(); high.type = 'highshelf';
+        const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.Q.value = 0.7;
+        input.connect(hp); hp.connect(low); low.connect(m1); m1.connect(m2);
+        m2.connect(high); high.connect(lp); lp.connect(output);
         function apply(p) {
           const t = ctx.currentTime;
-          low.gain.setTargetAtTime(p.low, t, 0.02);
-          mid.gain.setTargetAtTime(p.mid, t, 0.02);
-          mid.frequency.setTargetAtTime(p.midFreq, t, 0.02);
-          high.gain.setTargetAtTime(p.high, t, 0.02);
+          hp.frequency.setTargetAtTime(p.hpFreq, t, 0.02);
+          lp.frequency.setTargetAtTime(p.lpFreq, t, 0.02);
+          low.frequency.setTargetAtTime(p.lowFreq, t, 0.02);
+          low.gain.setTargetAtTime(p.lowGain, t, 0.02);
+          m1.frequency.setTargetAtTime(p.mid1Freq, t, 0.02);
+          m1.gain.setTargetAtTime(p.mid1Gain, t, 0.02);
+          m1.Q.setTargetAtTime(p.mid1Q, t, 0.02);
+          m2.frequency.setTargetAtTime(p.mid2Freq, t, 0.02);
+          m2.gain.setTargetAtTime(p.mid2Gain, t, 0.02);
+          m2.Q.setTargetAtTime(p.mid2Q, t, 0.02);
+          high.frequency.setTargetAtTime(p.highFreq, t, 0.02);
+          high.gain.setTargetAtTime(p.highGain, t, 0.02);
         }
         return { input, output, apply };
       },
-      // Fixed corner frequencies of the shelves (matched to build()).
-      lowFreq: 250,
-      highFreq: 4000,
       visual: eqVisual,
     },
 
     distortion: {
       label: 'Distortion',
       params: [
+        { group: 'Drive' },
         { k: 'drive',  label: 'Drive',  min: 0, max: 100, step: 1, def: 40, fmt: pct },
-        { k: 'character', label: 'Type', min: 0, max: 2, step: 1, def: 0,
-          fmt: (n) => ['Soft', 'Tube', 'Fuzz'][n] || 'Soft' },
-        { k: 'tone',   label: 'Tone',   min: 400, max: 16000, step: 100, def: 8000, fmt: fHz },
+        { k: 'character', label: 'Type', min: 0, max: 4, step: 1, def: 0,
+          fmt: (n) => SHAPER_LABELS[n] || 'Soft' },
+        { k: 'bias',   label: 'Bias',   min: 0, max: 100, step: 1, def: 0, fmt: pct },
+        { group: 'Tone' },
+        { k: 'lowcut', label: 'Low Cut', min: 20, max: 2000, step: 10, def: 20, fmt: fHz },
+        { k: 'tone',   label: 'High Cut', min: 400, max: 16000, step: 100, def: 8000, fmt: fHz },
+        { group: 'Output' },
+        { k: 'output', label: 'Output', min: -24, max: 12, step: 0.5, def: 0, fmt: gainDb },
         { k: 'mix',    label: 'Mix',    min: 0, max: 100, step: 1, def: 100, fmt: pct },
       ],
+      // Real gain-staged saturator: Low-cut → pre-gain (Drive) → shaper(Type,
+      // Bias) → post Tone → Output makeup, blended dry/wet. Drive pushes the
+      // signal harder into the nonlinearity (more harmonics), and Output
+      // compensates the level — the same interaction as a hardware pedal/preamp.
       build() {
         const input = ctx.createGain();
         const output = ctx.createGain();
         const dry = ctx.createGain();
+        const hp = ctx.createBiquadFilter();
+        hp.type = 'highpass'; hp.Q.value = 0.7;
+        const pre = ctx.createGain();
         const shaper = ctx.createWaveShaper();
         shaper.oversample = '4x';
         const tone = ctx.createBiquadFilter();
         tone.type = 'lowpass';
+        const post = ctx.createGain();        // output makeup
         const wet = ctx.createGain();
         let curKey = '';
         input.connect(dry); dry.connect(output);
-        input.connect(shaper); shaper.connect(tone); tone.connect(wet); wet.connect(output);
+        input.connect(hp); hp.connect(pre); pre.connect(shaper);
+        shaper.connect(tone); tone.connect(post); post.connect(wet); wet.connect(output);
         function apply(p) {
           const t = ctx.currentTime;
-          const kind = ['soft', 'tube', 'fuzz'][p.character] || 'soft';
-          const key = p.drive + '|' + kind;
-          if (key !== curKey) { shaper.curve = makeDriveCurve(p.drive, kind); curKey = key; }
+          const kind = SHAPER_KINDS[p.character] || 'soft';
+          const key = kind + '|' + p.bias;
+          if (key !== curKey) { shaper.curve = makeShaperCurve(kind, p.drive, p.bias); curKey = key; }
+          // Drive 0..100 → 0..+30 dB pre-gain into the shaper.
+          pre.gain.setTargetAtTime(dbToLin((p.drive / 100) * 30), t, 0.02);
+          hp.frequency.setTargetAtTime(p.lowcut, t, 0.02);
           tone.frequency.setTargetAtTime(p.tone, t, 0.02);
+          post.gain.setTargetAtTime(dbToLin(p.output), t, 0.02);
           const m = p.mix / 100;
           wet.gain.setTargetAtTime(m, t, 0.02);
           dry.gain.setTargetAtTime(1 - m, t, 0.02);
         }
         return { input, output, apply };
       },
+      visual: distortionVisual,
     },
 
     pitch: {
@@ -605,6 +766,8 @@
       params: [
         { k: 'semitones', label: 'Pitch', min: -24, max: 24, step: 1, def: -12,
           fmt: (n) => (n > 0 ? '+' : '') + n + 'st' },
+        { k: 'cents', label: 'Fine', min: -100, max: 100, step: 1, def: 0,
+          fmt: (n) => (n > 0 ? '+' : '') + n + 'c' },
         { k: 'mix',    label: 'Mix',    min: 0, max: 100, step: 1, def: 100, fmt: pct },
       ],
       // Genuine transposition via the granular pitch-shift AudioWorklet. Falls
@@ -631,11 +794,11 @@
 
         function apply(p) {
           const t = ctx.currentTime;
-          // At 0 st (or no worklet) pass dry through cleanly — the granular
-          // engine would otherwise add slight warble at unity.
-          const bypass = !node || p.semitones === 0;
+          // At unity (0 st, 0 cents) or no worklet, pass dry through cleanly —
+          // the granular engine would otherwise add slight warble.
+          const bypass = !node || (p.semitones === 0 && p.cents === 0);
           if (node) {
-            const ratio = Math.pow(2, p.semitones / 12);
+            const ratio = Math.pow(2, (p.semitones + p.cents / 100) / 12);
             node.parameters.get('ratio').setTargetAtTime(ratio, t, 0.02);
           }
           const m = p.mix / 100;
@@ -653,7 +816,7 @@
   // Default params object for a fresh instance of `type`.
   function fxDefaults(type) {
     const p = {};
-    FX_DEFS[type].params.forEach((pr) => { p[pr.k] = pr.def; });
+    FX_DEFS[type].params.forEach((pr) => { if (pr.k) p[pr.k] = pr.def; });
     return p;
   }
 
@@ -2173,9 +2336,24 @@
     });
     const r = anchor.getBoundingClientRect();
     menu.style.left = r.left + 'px';
-    menu.style.top = (r.bottom + 4) + 'px';
     menu.style.width = r.width + 'px';
+    // Append first so we can measure its height, then place it so it always
+    // stays on screen: below the button if it fits, otherwise above it, and
+    // clamped to the viewport with a small margin either way.
     document.body.appendChild(menu);
+    const gap = 4, margin = 8;
+    const h = menu.offsetHeight;
+    const below = r.bottom + gap;
+    let top;
+    if (below + h <= window.innerHeight - margin) {
+      top = below;                                  // fits below
+    } else if (r.top - gap - h >= margin) {
+      top = r.top - gap - h;                        // flip above
+    } else {
+      // taller than either side: clamp to the viewport (menu CSS lets it scroll)
+      top = Math.max(margin, window.innerHeight - margin - h);
+    }
+    menu.style.top = top + 'px';
     openAddMenu = menu;
     // close on outside click (defer so this click doesn't immediately close it)
     setTimeout(() => document.addEventListener('click', closeAddMenu), 0);
@@ -2214,6 +2392,14 @@
     // Build the sliders; keep per-key refs so a custom visual can sync them.
     const sliderRefs = {};
     def.params.forEach((pr) => {
+      // A { group: 'Name' } entry renders a sub-heading divider, not a slider.
+      if (pr.group) {
+        const h = document.createElement('p');
+        h.className = 'fx-group-label';
+        h.textContent = pr.group;
+        body.appendChild(h);
+        return;
+      }
       const rowEl = document.createElement('div');
       rowEl.className = 'slider-row';
       const label = document.createElement('label');
@@ -2242,19 +2428,24 @@
     });
 
     win.appendChild(head);
+
+    // Optional interactive visualization (e.g. EQ response curve). It lives in
+    // its own fixed area ABOVE the scrolling body so it stays visible while you
+    // scroll the sliders. The visual edits inst.params directly; syncSliders
+    // refreshes the slider rows to match after a drag.
+    if (def.visual) {
+      const visualHost = document.createElement('div');
+      visualHost.className = 'fx-window-visual';
+      win.appendChild(visualHost);
+      const syncSliders = () => Object.values(sliderRefs).forEach((fn) => fn());
+      def.visual(visualHost, inst, which, syncSliders);
+    }
+
     win.appendChild(body);
     host.appendChild(win);
     fxWindows[key] = win;
     bringToFront(win);
     makeDraggable(win, head);
-
-    // Optional interactive visualization (e.g. EQ response curve). It prepends
-    // its own UI above the sliders and edits inst.params directly; syncSliders
-    // refreshes the slider rows to match after a drag.
-    if (def.visual) {
-      const syncSliders = () => Object.values(sliderRefs).forEach((fn) => fn());
-      def.visual(body, inst, which, syncSliders);
-    }
   }
 
   // Close every open settings window belonging to one rack (used when its

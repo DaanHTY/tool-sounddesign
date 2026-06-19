@@ -778,9 +778,11 @@ body {
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
   padding: 4px;
   position: fixed;
+  scrollbar-width: thin;
   z-index: 200;
 }
 
@@ -812,6 +814,7 @@ body {
   box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
   display: flex;
   flex-direction: column;
+  max-height: 88vh;          /* head + visual stay fixed; body scrolls within */
   position: fixed;
   width: 280px;
 }
@@ -822,6 +825,7 @@ body {
   border-radius: var(--radius-sm) var(--radius-sm) 0 0;
   cursor: grab;
   display: flex;
+  flex-shrink: 0;
   gap: 8px;
   padding: 10px 10px 10px 14px;
   user-select: none;
@@ -855,14 +859,42 @@ body {
 .fx-window-body {
   display: flex;
   flex-direction: column;
+  flex: 1 1 auto;
   gap: var(--tool-control-gap);
+  min-height: 0;             /* allow the flex child to shrink + scroll */
+  overflow-x: hidden;
+  overflow-y: auto;
   padding: 16px 14px;
+  scrollbar-width: thin;
+}
+
+/* Sub-group heading inside an FX window (e.g. "Tone" / "Modulation"). */
+.fx-group-label {
+  color: var(--text-subtle);
+  font-family: var(--font-mono);
+  font-size: 0.5625rem;
+  letter-spacing: 0.04em;
+  margin: 6px 0 -2px;
+  text-transform: uppercase;
+}
+.fx-group-label:first-child { margin-top: 0; }
+
+/* Fixed visualization area: stays put above the scrolling slider list. */
+.fx-window-visual {
+  flex-shrink: 0;
+  padding: 14px 14px 0;
+}
+
+/* When a window has a fixed visual on top, the body's own top padding would
+   double the gap — tighten it. */
+.fx-window-visual + .fx-window-body {
+  padding-top: 12px;
 }
 
 .eq-graph {
   background: var(--surface);
   border-radius: var(--radius-sm);
-  margin-bottom: 4px;
+  flex-shrink: 0;            /* don't let the graph collapse when the body scrolls */
   overflow: hidden;
   padding: 6px;
 }
@@ -870,16 +902,26 @@ body {
 .eq-graph canvas {
   cursor: crosshair;
   display: block;
+  height: auto;
+  width: 100%;              /* fill the graph box regardless of backing-store size */
 }
 
-.fx-window-body .slider-row label { width: 72px; }
+.fx-window-body .slider-row {
+  flex-shrink: 0;           /* rows keep full height; body scrolls instead */
+}
+
+.fx-window-body .slider-row label {
+  flex-shrink: 0;
+  width: 64px;
+}
 
 .fx-window-body .val {
   background: var(--surface-input);
   border-radius: 99px;
+  flex-shrink: 0;           /* never squeeze the value chip — keeps numbers intact */
   font-variant-numeric: tabular-nums;
-  min-width: 54px;
-  padding: 5px 10px;
+  min-width: 48px;
+  padding: 5px 8px;
   text-align: center;
 }
 
