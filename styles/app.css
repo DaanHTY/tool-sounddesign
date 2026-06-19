@@ -117,6 +117,17 @@ body {
 
 .sidebar-scroll[hidden] { display: none; }
 
+/* voice-controls wrappers flow their sections with the normal section gap */
+#chord-controls,
+#synth-controls {
+  display: flex;
+  flex-direction: column;
+  gap: var(--tool-section-gap);
+}
+
+#chord-controls[hidden],
+#synth-controls[hidden] { display: none; }
+
 .sidebar-scroll::-webkit-scrollbar {
   display: none;
   height: 0;

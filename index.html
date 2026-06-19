@@ -27,56 +27,123 @@
           <div class="btn-grid pads" id="pad-grid"></div>
         </section>
 
-        <section class="section">
-          <p class="section-label">Chord</p>
-          <select class="select" id="chord-select"></select>
-        </section>
+        <!-- Chord voice controls -->
+        <div id="chord-controls">
+          <section class="section">
+            <p class="section-label">Chord</p>
+            <select class="select" id="chord-select"></select>
+          </section>
+
+          <section class="section">
+            <p class="section-label">Resonator</p>
+            <div class="slider-row">
+              <label for="s-q">Tightness</label>
+              <input type="range" id="s-q" min="2" max="500" step="1" value="250" />
+              <span class="val" id="v-q">250</span>
+            </div>
+            <div class="slider-row">
+              <label for="s-gain">Peak</label>
+              <input type="range" id="s-gain" min="-6" max="50" step="1" value="15" />
+              <span class="val" id="v-gain">15dB</span>
+            </div>
+            <div class="slider-row">
+              <label for="s-noise">Noise</label>
+              <input type="range" id="s-noise" min="0" max="100" step="1" value="35" />
+              <span class="val" id="v-noise">35</span>
+            </div>
+            <div class="slider-row">
+              <label for="s-vol">Volume</label>
+              <input type="range" id="s-vol" min="0" max="100" step="1" value="35" />
+              <span class="val" id="v-vol">35</span>
+            </div>
+          </section>
+
+          <section class="section">
+            <p class="section-label">Shape</p>
+            <div class="slider-row">
+              <label for="s-attack">Attack</label>
+              <input type="range" id="s-attack" min="1" max="2000" step="1" value="40" />
+              <span class="val" id="v-attack">40</span>
+            </div>
+            <div class="slider-row">
+              <label for="s-release">Release</label>
+              <input type="range" id="s-release" min="20" max="4000" step="10" value="600" />
+              <span class="val" id="v-release">600</span>
+            </div>
+            <div class="slider-row">
+              <label for="s-strum">Strum</label>
+              <input type="range" id="s-strum" min="0" max="300" step="1" value="0" />
+              <span class="val" id="v-strum">0</span>
+            </div>
+          </section>
+        </div>
+
+        <!-- Synth voice controls -->
+        <div id="synth-controls" hidden>
+          <section class="section">
+            <p class="section-label">Oscillator</p>
+            <div class="slider-row">
+              <label for="sy-wave">Wave</label>
+              <select class="select" id="sy-wave"></select>
+            </div>
+            <div class="slider-row">
+              <label for="sy-pitch">Pitch</label>
+              <input type="range" id="sy-pitch" min="-24" max="24" step="1" value="0" />
+              <span class="val" id="vy-pitch">0</span>
+            </div>
+            <div class="slider-row">
+              <label for="sy-drop">Drop</label>
+              <input type="range" id="sy-drop" min="0" max="36" step="1" value="12" />
+              <span class="val" id="vy-drop">12</span>
+            </div>
+            <div class="slider-row">
+              <label for="sy-droptime">Drop T</label>
+              <input type="range" id="sy-droptime" min="1" max="200" step="1" value="9" />
+              <span class="val" id="vy-droptime">9</span>
+            </div>
+          </section>
+
+          <section class="section">
+            <p class="section-label">Tone</p>
+            <div class="slider-row">
+              <label for="sy-noise">Noise</label>
+              <input type="range" id="sy-noise" min="0" max="100" step="1" value="0" />
+              <span class="val" id="vy-noise">0</span>
+            </div>
+            <div class="slider-row">
+              <label for="sy-cutoff">Cutoff</label>
+              <input type="range" id="sy-cutoff" min="200" max="18000" step="100" value="18000" />
+              <span class="val" id="vy-cutoff">18k</span>
+            </div>
+          </section>
+
+          <section class="section">
+            <p class="section-label">Shape</p>
+            <div class="slider-row">
+              <label for="sy-attack">Attack</label>
+              <input type="range" id="sy-attack" min="0" max="500" step="1" value="2" />
+              <span class="val" id="vy-attack">2</span>
+            </div>
+            <div class="slider-row">
+              <label for="sy-decay">Decay</label>
+              <input type="range" id="sy-decay" min="10" max="1500" step="5" value="180" />
+              <span class="val" id="vy-decay">180</span>
+            </div>
+            <div class="slider-row">
+              <label for="sy-release">Release</label>
+              <input type="range" id="sy-release" min="5" max="2000" step="5" value="80" />
+              <span class="val" id="vy-release">80</span>
+            </div>
+            <div class="slider-row">
+              <label for="sy-level">Level</label>
+              <input type="range" id="sy-level" min="0" max="100" step="1" value="90" />
+              <span class="val" id="vy-level">90</span>
+            </div>
+          </section>
+        </div>
 
         <section class="section">
-          <p class="section-label">Resonator</p>
-          <div class="slider-row">
-            <label for="s-q">Tightness</label>
-            <input type="range" id="s-q" min="2" max="500" step="1" value="250" />
-            <span class="val" id="v-q">250</span>
-          </div>
-          <div class="slider-row">
-            <label for="s-gain">Peak</label>
-            <input type="range" id="s-gain" min="-6" max="50" step="1" value="15" />
-            <span class="val" id="v-gain">15dB</span>
-          </div>
-          <div class="slider-row">
-            <label for="s-noise">Noise</label>
-            <input type="range" id="s-noise" min="0" max="100" step="1" value="35" />
-            <span class="val" id="v-noise">35</span>
-          </div>
-          <div class="slider-row">
-            <label for="s-vol">Volume</label>
-            <input type="range" id="s-vol" min="0" max="100" step="1" value="35" />
-            <span class="val" id="v-vol">35</span>
-          </div>
-        </section>
-
-        <section class="section">
-          <p class="section-label">Shape</p>
-          <div class="slider-row">
-            <label for="s-attack">Attack</label>
-            <input type="range" id="s-attack" min="1" max="2000" step="1" value="40" />
-            <span class="val" id="v-attack">40</span>
-          </div>
-          <div class="slider-row">
-            <label for="s-release">Release</label>
-            <input type="range" id="s-release" min="20" max="4000" step="10" value="600" />
-            <span class="val" id="v-release">600</span>
-          </div>
-          <div class="slider-row">
-            <label for="s-strum">Strum</label>
-            <input type="range" id="s-strum" min="0" max="300" step="1" value="0" />
-            <span class="val" id="v-strum">0</span>
-          </div>
-        </section>
-
-        <section class="section">
-          <p class="section-label">Chord FX</p>
+          <p class="section-label">FX</p>
           <div class="slider-row">
             <label for="s-drive">Drive</label>
             <input type="range" id="s-drive" min="0" max="100" step="1" value="0" />

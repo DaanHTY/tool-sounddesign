@@ -38,10 +38,12 @@
   // Resonator mode is locked to Bandpass (the Mode selector was removed).
   // Stripped back to the noise-chord engine. The palette keeps its structure
   // (one voice for now) so custom voices can be added later.
-  const PALETTE = ['Chord'];
+  const PALETTE = ['Chord', 'Synth'];
   const VOICE_COLORS = {
     Chord:  '#c5a8ff',
+    Synth:  '#7fe0d0',
   };
+  const SY_WAVES = ['sine', 'triangle', 'square', 'sawtooth'];
 
   const KEY_SEMITONE = {
     a: 0, w: 1, s: 2, e: 3, d: 4, f: 5,
@@ -79,6 +81,17 @@
     tTone: 18000,
     tDelay: 0,
     tSpace: 0,
+    // synth voice (osc + noise blend)
+    syWave: 'sine',
+    syPitch: 0,        // semitone offset from the row
+    syDrop: 12,        // start this many semitones above, glide down to pitch
+    syDropTime: 9,     // ms for the glide
+    syNoise: 0,        // 0 = pure osc, 100 = pure noise
+    syCutoff: 18000,   // lowpass on the blended osc+noise
+    syAttack: 2,       // ms
+    syDecay: 180,      // ms
+    syRelease: 80,     // ms
+    syLevel: 90,
     droneOn: false,
     selectedVoice: null,
     editingKey: null,    // 'step:midi' of the placed chord being edited, or null
@@ -278,18 +291,25 @@
     return dbToLin(state.gain) * Math.sqrt(state.q / 80) * STAGES;
   }
 
-  // The per-chord sound-design settings (everything on the Palette tab incl.
-  // Chord FX). A placed chord freezes these so later slider changes don't alter
-  // it. SNAP_KEYS are copied straight from `state`.
-  const SNAP_KEYS = [
-    'chord', 'q', 'gain', 'noise', 'volume', 'attack', 'release', 'strum',
-    'drive', 'tone', 'delay', 'space',
-  ];
-  function chordSnapshot() {
-    const s = {};
-    SNAP_KEYS.forEach((k) => { s[k] = state[k]; });
+  // Each voice freezes its own sound-design settings onto every placed block, so
+  // later slider changes don't alter blocks already placed. The shared per-block
+  // FX (drive/tone/delay/space) is captured for every voice.
+  const FX_KEYS = ['drive', 'tone', 'delay', 'space'];
+  const VOICE_SNAP_KEYS = {
+    Chord: ['chord', 'q', 'gain', 'noise', 'volume', 'attack', 'release', 'strum'],
+    Synth: ['syWave', 'syPitch', 'syDrop', 'syDropTime', 'syNoise', 'syCutoff',
+            'syAttack', 'syDecay', 'syRelease', 'syLevel'],
+  };
+  // Back-compat alias used by the chord selection/editing code.
+  const SNAP_KEYS = VOICE_SNAP_KEYS.Chord.concat(FX_KEYS);
+
+  function voiceSnapshot(voice) {
+    const s = { voice };
+    (VOICE_SNAP_KEYS[voice] || []).concat(FX_KEYS).forEach((k) => { s[k] = state[k]; });
     return s;
   }
+  // Chord-specific snapshot (kept for the chord code paths that call it).
+  function chordSnapshot() { return voiceSnapshot('Chord'); }
   const snapResoLevel = (p) => dbToLin(p.gain) * Math.sqrt(p.q / 80) * STAGES;
 
   // Self-contained sustained chord. Spins up its own noise source, filter bank,
@@ -349,6 +369,70 @@
     src.start(t);
     src.stop(tEnd + 0.05);
     // Tear down the per-chord FX chain a bit after the tail (delay/reverb) ends.
+    const tail = tEnd + 2.5;
+    setTimeout(() => { try { fx.output.disconnect(); } catch (e) {} },
+               Math.max((tail - ctx.currentTime) * 1000, 100));
+  }
+
+  // Synth voice: oscillator + noise blended by `syNoise`, through a lowpass,
+  // shaped by an attack→decay→(sustain over hold)→release envelope, with a
+  // pitch that starts `syDrop` semitones above the note and glides down. Like
+  // the chord voice it carries its own frozen FX chain. `snap` omitted = live.
+  function playSynthVoice(dest, t, midi, lenSec, snap) {
+    if (!ctx) return;
+    const p = snap || voiceSnapshot('Synth');
+    const baseFreq = midiToFreq(midi);
+    const startFreq = baseFreq * Math.pow(2, p.syDrop / 12);
+    const atk = Math.max(p.syAttack / 1000, 0.0005);
+    const dec = Math.max(p.syDecay / 1000, 0.001);
+    const rel = Math.max(p.syRelease / 1000, 0.005);
+    const hold = Math.max(lenSec, 0.02);
+    const level = p.syLevel / 100;
+    const sustain = level * 0.4;            // floor the decay rests at
+    const tPeak = t + atk;
+    const tDecayEnd = tPeak + dec;
+    const tHoldEnd = Math.max(tDecayEnd, t + atk + hold);
+    const tEnd = tHoldEnd + rel;
+
+    const fx = makeFXChain();
+    fx.apply({ drive: p.drive, tone: p.tone, delay: p.delay, space: p.space });
+    fx.output.connect(dest);
+
+    // tone + noise blended into one filtered amp envelope
+    const osc = ctx.createOscillator();
+    osc.type = p.syWave;
+    osc.frequency.setValueAtTime(startFreq, t);
+    if (p.syDrop !== 0) {
+      osc.frequency.exponentialRampToValueAtTime(baseFreq, t + Math.max(p.syDropTime / 1000, 0.001));
+    }
+    const oscGain = ctx.createGain();
+    oscGain.gain.value = 1 - p.syNoise / 100;
+
+    const nz = ctx.createBufferSource();
+    nz.buffer = noiseBuf;
+    nz.loop = true;
+    const nzGain = ctx.createGain();
+    nzGain.gain.value = p.syNoise / 100;
+
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = p.syCutoff;
+    lp.Q.value = 0.7;
+
+    const amp = ctx.createGain();
+    amp.gain.setValueAtTime(0.0001, t);
+    amp.gain.linearRampToValueAtTime(level, tPeak);
+    amp.gain.exponentialRampToValueAtTime(Math.max(sustain, 0.0002), tDecayEnd);
+    amp.gain.setValueAtTime(Math.max(sustain, 0.0002), tHoldEnd);
+    amp.gain.linearRampToValueAtTime(0.0001, tEnd);
+
+    osc.connect(oscGain); oscGain.connect(lp);
+    nz.connect(nzGain); nzGain.connect(lp);
+    lp.connect(amp); amp.connect(fx.input);
+
+    osc.start(t); osc.stop(tEnd + 0.05);
+    nz.start(t); nz.stop(tEnd + 0.05);
+
     const tail = tEnd + 2.5;
     setTimeout(() => { try { fx.output.disconnect(); } catch (e) {} },
                Math.max((tail - ctx.currentTime) * 1000, 100));
@@ -471,6 +555,19 @@
         playChordVoice(dest, t, midi != null ? midi : baseMidi(), lenSec, snap);
       },
     },
+
+    // Oscillator + noise synth. Dial a sine with a fast pitch drop for a "plop";
+    // noise + short decay for a click; low sine for a sub; etc.
+    Synth: {
+      chord: true,    // routes through the per-block FX bus like the chord voice
+      params: [],
+      play(dest, t, p, midi, snap) {
+        playSynthVoice(dest, t, midi != null ? midi : baseMidi(), 0.18, snap);
+      },
+      playLen(dest, t, midi, lenSec, snap) {
+        playSynthVoice(dest, t, midi != null ? midi : baseMidi(), lenSec, snap);
+      },
+    },
   };
 
   // Per-voice live param values, seeded from defaults.
@@ -533,10 +630,18 @@
     setTimeout(() => b.classList.remove('triggered'), 90);
   }
 
+  // Show only the active voice's controls block in the sidebar.
+  function showVoiceControls(name) {
+    const cc = $('chord-controls'), sc = $('synth-controls');
+    if (cc) cc.hidden = name !== 'Chord';
+    if (sc) sc.hidden = name !== 'Synth';
+  }
+
   function selectVoice(name) {
     if (state.selectedVoice === name) return;
     state.selectedVoice = name;
     PALETTE.forEach((n) => padButtons[n].classList.toggle('active', n === name));
+    showVoiceControls(name);
     renderVoicePanel(name);
   }
 
@@ -609,6 +714,17 @@
       updateReadout();
       mirrorToEditing();
     });
+
+    // Synth oscillator waveform dropdown.
+    const wsel = $('sy-wave');
+    SY_WAVES.forEach((w) => {
+      const opt = document.createElement('option');
+      opt.value = w;
+      opt.textContent = w;
+      wsel.appendChild(opt);
+    });
+    wsel.value = state.syWave;
+    wsel.addEventListener('change', () => { state.syWave = wsel.value; mirrorToEditing(); });
   }
 
   function bindSlider(id, valId, onChange, fmt) {
@@ -1330,12 +1446,11 @@
     return newKey;
   }
 
-  // `snap` (optional) is a frozen chord settings object; omit for live state.
+  // `snap` (optional) is a frozen settings object; omit for live state.
   function auditionVoice(voice, midi, snap) {
     resume();
     const def = VOICE_DEFS[voice];
-    const atk = (snap || state).attack;
-    if (def.chord) def.playLen(masterSum, ctx.currentTime + 0.001, midi, Math.max(atk + 0.2, 0.3), snap);
+    if (def.chord) def.playLen(masterSum, ctx.currentTime + 0.001, midi, 0.35, snap);
     else def.play(fxInput, ctx.currentTime + 0.001, voiceParams[voice], midi);
   }
 
@@ -1343,45 +1458,63 @@
 
   // Push a snapshot's values into the Palette-tab sliders / chord select so the
   // sidebar shows the selected (or default) chord's frozen settings.
+  // Push a snapshot's values into the sidebar controls for its voice (and the
+  // shared FX), so the sidebar reflects the selected/default block.
   function syncPaletteFromSnapshot(p) {
     state.syncing = true;
     const set = (id, v) => { const el = $(id); if (el) { el.value = v; el.dispatchEvent(new Event('input')); } };
-    set('s-q', p.q);
-    set('s-gain', p.gain);
-    set('s-noise', Math.round(p.noise * 100));
-    set('s-vol', Math.round(p.volume * 100));
-    set('s-attack', Math.round(p.attack * 1000));
-    set('s-release', Math.round(p.release * 1000));
-    set('s-strum', Math.round(p.strum * 1000));
+    const setSel = (id, v) => { const el = $(id); if (el) { el.value = v; el.dispatchEvent(new Event('change')); } };
+
+    if (p.voice === 'Synth') {
+      setSel('sy-wave', p.syWave);
+      set('sy-pitch', p.syPitch);
+      set('sy-drop', p.syDrop);
+      set('sy-droptime', p.syDropTime);
+      set('sy-noise', p.syNoise);
+      set('sy-cutoff', p.syCutoff);
+      set('sy-attack', p.syAttack);
+      set('sy-decay', p.syDecay);
+      set('sy-release', p.syRelease);
+      set('sy-level', p.syLevel);
+    } else {
+      set('s-q', p.q);
+      set('s-gain', p.gain);
+      set('s-noise', Math.round(p.noise * 100));
+      set('s-vol', Math.round(p.volume * 100));
+      set('s-attack', Math.round(p.attack * 1000));
+      set('s-release', Math.round(p.release * 1000));
+      set('s-strum', Math.round(p.strum * 1000));
+      setSel('chord-select', p.chord);
+    }
     set('s-drive', p.drive);
     set('s-tone', p.tone);
     set('s-delay', p.delay);
     set('s-space', p.space);
-    const sel = $('chord-select');
-    if (sel) { sel.value = p.chord; sel.dispatchEvent(new Event('change')); }
     state.syncing = false;
   }
 
-  // Select a placed chord for editing: load its frozen settings into `state`
-  // and reflect them in the sidebar. Sidebar edits then mirror back to it.
+  // Select a placed block for editing: switch to its voice, load its frozen
+  // settings into `state`, and reflect them in the sidebar. Sidebar edits then
+  // mirror back to it.
   function selectPlacedNote(key) {
     const note = SEQ.notes.get(key);
     if (!note || !note.fx) { state.editingKey = null; return; }
     state.editingKey = key;
-    SNAP_KEYS.forEach((k) => { state[k] = note.fx[k]; });
+    selectVoice(note.voice);                 // show that voice's controls + pad
+    Object.keys(note.fx).forEach((k) => { if (k !== 'voice') state[k] = note.fx[k]; });
     syncPaletteFromSnapshot(note.fx);
     applyLiveParams();
     applyFX();
     updateReadout();
   }
 
-  // Mirror the current Palette-tab settings into the selected chord (so editing
-  // a slider changes that placed chord, not future placements). No-op while
-  // loading a snapshot, or when nothing is selected.
+  // Mirror the current sidebar settings into the selected block (so editing a
+  // slider changes that placed block, not future placements). No-op while
+  // loading a snapshot or when nothing is selected.
   function mirrorToEditing() {
     if (state.syncing || !state.editingKey) return;
     const note = SEQ.notes.get(state.editingKey);
-    if (note) note.fx = chordSnapshot();
+    if (note) note.fx = voiceSnapshot(note.voice);
   }
 
   function rollDown(e) {
@@ -1423,10 +1556,10 @@
                  moved: false };
       }
     } else {
-      // New chord: freeze current Palette settings. NOT auto-selected, and
-      // placing clears any prior selection so the sidebar edits "next" defaults.
+      // New block: freeze the active voice's current settings. NOT auto-selected,
+      // and placing clears any prior selection so the sidebar edits "next" defaults.
       const key = c.step + ':' + c.midi;
-      const note = { voice, len: 1, fx: chordSnapshot() };
+      const note = { voice, len: 1, fx: voiceSnapshot(voice) };
       SEQ.notes.set(key, note);
       state.editingKey = null;
       drag = { mode: 'right', key, midi: c.midi, anchorStep: c.step, moved: false, isNew: true };
@@ -1598,6 +1731,18 @@
     bindSlider('s-strum', 'v-strum', (n) => { state.strum = n / 1000; mirrorToEditing(); }, (n) => n + 'ms');
 
     const fHzShort = (n) => (n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k' : n);
+    const fSemi = (n) => (n > 0 ? '+' : '') + n;
+
+    // Synth voice — osc + noise blend (frozen onto the block when placed/edited)
+    bindSlider('sy-pitch', 'vy-pitch', (n) => { state.syPitch = n; mirrorToEditing(); }, fSemi);
+    bindSlider('sy-drop', 'vy-drop', (n) => { state.syDrop = n; mirrorToEditing(); }, fSemi);
+    bindSlider('sy-droptime', 'vy-droptime', (n) => { state.syDropTime = n; mirrorToEditing(); }, (n) => n + 'ms');
+    bindSlider('sy-noise', 'vy-noise', (n) => { state.syNoise = n; mirrorToEditing(); });
+    bindSlider('sy-cutoff', 'vy-cutoff', (n) => { state.syCutoff = n; mirrorToEditing(); }, fHzShort);
+    bindSlider('sy-attack', 'vy-attack', (n) => { state.syAttack = n; mirrorToEditing(); }, (n) => n + 'ms');
+    bindSlider('sy-decay', 'vy-decay', (n) => { state.syDecay = n; mirrorToEditing(); }, (n) => n + 'ms');
+    bindSlider('sy-release', 'vy-release', (n) => { state.syRelease = n; mirrorToEditing(); }, (n) => n + 'ms');
+    bindSlider('sy-level', 'vy-level', (n) => { state.syLevel = n; mirrorToEditing(); });
 
     // Chord FX — per-chord-voice (frozen onto the chord when placed/edited)
     bindSlider('s-drive', 'v-drive', (n) => { state.drive = n; applyFX(); mirrorToEditing(); });
