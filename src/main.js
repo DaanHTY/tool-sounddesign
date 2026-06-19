@@ -82,16 +82,16 @@
     tDelay: 0,
     tSpace: 0,
     // synth voice (osc + noise blend)
+    // defaults recreate the old "plop": sine, fast pitch drop, short AD
     syWave: 'sine',
-    syPitch: 0,        // semitone offset from the row
     syDrop: 12,        // start this many semitones above, glide down to pitch
     syDropTime: 9,     // ms for the glide
     syNoise: 0,        // 0 = pure osc, 100 = pure noise
     syCutoff: 18000,   // lowpass on the blended osc+noise
     syAttack: 2,       // ms
-    syDecay: 180,      // ms
-    syRelease: 80,     // ms
-    syLevel: 90,
+    syDecay: 110,      // ms
+    syRelease: 60,     // ms
+    syLevel: 50,
     droneOn: false,
     selectedVoice: null,
     editingKey: null,    // 'step:midi' of the placed chord being edited, or null
@@ -297,7 +297,7 @@
   const FX_KEYS = ['drive', 'tone', 'delay', 'space'];
   const VOICE_SNAP_KEYS = {
     Chord: ['chord', 'q', 'gain', 'noise', 'volume', 'attack', 'release', 'strum'],
-    Synth: ['syWave', 'syPitch', 'syDrop', 'syDropTime', 'syNoise', 'syCutoff',
+    Synth: ['syWave', 'syDrop', 'syDropTime', 'syNoise', 'syCutoff',
             'syAttack', 'syDecay', 'syRelease', 'syLevel'],
   };
   // Back-compat alias used by the chord selection/editing code.
@@ -1467,7 +1467,6 @@
 
     if (p.voice === 'Synth') {
       setSel('sy-wave', p.syWave);
-      set('sy-pitch', p.syPitch);
       set('sy-drop', p.syDrop);
       set('sy-droptime', p.syDropTime);
       set('sy-noise', p.syNoise);
@@ -1734,7 +1733,6 @@
     const fSemi = (n) => (n > 0 ? '+' : '') + n;
 
     // Synth voice — osc + noise blend (frozen onto the block when placed/edited)
-    bindSlider('sy-pitch', 'vy-pitch', (n) => { state.syPitch = n; mirrorToEditing(); }, fSemi);
     bindSlider('sy-drop', 'vy-drop', (n) => { state.syDrop = n; mirrorToEditing(); }, fSemi);
     bindSlider('sy-droptime', 'vy-droptime', (n) => { state.syDropTime = n; mirrorToEditing(); }, (n) => n + 'ms');
     bindSlider('sy-noise', 'vy-noise', (n) => { state.syNoise = n; mirrorToEditing(); });
