@@ -1077,9 +1077,10 @@
     activeBoardId = id;
     syncBoardSliders();
     renderBoardTabs();
-    // arrangement is per-board: show this board's own clips (or hide if none)
-    renderArrange();
+    // arrangement is per-board: show this board's own clips (or hide if none).
+    // Show first so renderArrange can measure the panel width.
     refreshArrangeVisibility();
+    renderArrange();
   }
 
   function addBoard() {
@@ -1210,11 +1211,15 @@
   const boardLen = (b) => b ? b.steps * boardStepDur(b) : 0;  // pattern seconds
   const arrHasClips = () => ARR.lanes.some((l) => l.length);
 
-  // Snap a time (seconds) to the HOST board's step grid.
-  function snapToHostStep(sec) {
-    const sd = boardStepDur(activeBoard());
-    return sd > 0 ? Math.max(0, Math.round(sec / sd) * sd) : Math.max(0, sec);
-  }
+  // Clip positions are stored as an integer STEP index on the host grid, so a
+  // clip stays glued to its step when the host BPM changes (BPM only changes
+  // pixels-per-step, not the step a clip lives on).
+  const stepPxNow = () => boardStepDur(activeBoard()) * ARR.pxPerSec;  // px per step
+  const pxToStep = (px) => {
+    const sp = stepPxNow();
+    return sp > 0 ? Math.max(0, Math.round(px / sp)) : 0;
+  };
+  const clipStartSec = (clip) => clip.startStep * boardStepDur(activeBoard());
 
   function showArrange(show) {
     $('arrange').hidden = !show;
@@ -1225,9 +1230,10 @@
     showArrange(arrHasClips());
   }
 
-  function addClip(boardId, laneIdx, start) {
+  // `startPx` is the drop x in pixels within a lane; snap it to a step index.
+  function addClip(boardId, laneIdx, startPx) {
     const lane = ARR.lanes[laneIdx] || ARR.lanes[0];
-    lane.push({ id: ARR.clipSeq++, boardId, start: snapToHostStep(start) });
+    lane.push({ id: ARR.clipSeq++, boardId, startStep: pxToStep(startPx) });
     showArrange(true);
     renderArrange();
   }
@@ -1255,9 +1261,17 @@
     if (!host) return;
     host.textContent = '';
 
-    // host board's step grid, drawn as a repeating background on every lane
-    const stepPx = boardStepDur(activeBoard()) * ARR.pxPerSec;
+    // The host board's full bar fills the available lane width: derive the
+    // time scale so `steps` columns span the whole component. Everything that
+    // reads ARR.pxPerSec (clips, drops, playhead) stays in sync.
+    const host_b = activeBoard();
+    const barSec = boardLen(host_b);                     // host bar in seconds
+    const avail = host.clientWidth - 24;                 // minus left/right padding
+    ARR.pxPerSec = (barSec > 0 && avail > 0) ? avail / barSec : 80;
+
+    const stepPx = boardStepDur(host_b) * ARR.pxPerSec;
     const beatPx = stepPx * SEQ.perBeat;
+    const barPx = stepPx * host_b.steps;                 // == avail, fills width
     const gridBg = stepPx > 1
       ? `repeating-linear-gradient(to right,
            rgba(255,255,255,0.10) 0 1px, transparent 1px ${beatPx}px),
@@ -1270,6 +1284,9 @@
       laneEl.className = 'arrange-lane';
       laneEl.dataset.lane = laneIdx;
       laneEl.style.backgroundImage = gridBg;
+      // draw the grid across the host's bar (now == available width)
+      laneEl.style.backgroundRepeat = 'no-repeat';
+      laneEl.style.backgroundSize = barPx > 0 ? (barPx + 'px 100%') : 'auto';
 
       // drop targets (tab→clip and clip move)
       laneEl.addEventListener('dragover', (e) => {
@@ -1283,7 +1300,7 @@
         const rect = laneEl.getBoundingClientRect();
         const dropX = e.clientX - rect.left;
         const boardId = parseInt(e.dataTransfer.getData('text/board-id'), 10);
-        if (boardId && boardId !== activeBoardId) addClip(boardId, laneIdx, dropX / ARR.pxPerSec);
+        if (boardId && boardId !== activeBoardId) addClip(boardId, laneIdx, dropX);
       });
 
       lane.forEach((clip) => {
@@ -1291,7 +1308,7 @@
         if (!b) return;
         const el = document.createElement('div');
         el.className = 'arrange-clip';
-        el.style.left = (clip.start * ARR.pxPerSec) + 'px';
+        el.style.left = (clip.startStep * stepPxNow()) + 'px';
         el.style.width = Math.max(boardLen(b) * ARR.pxPerSec, 28) + 'px';
         el.style.background = '#c5a8ff';
         el.title = b.name + ' — ' + boardLen(b).toFixed(1) + 's';
@@ -1337,11 +1354,11 @@
     });
     const clip = arrDragClip.clip;
 
-    // new start from cursor x within whichever lane row, snapped to host steps
+    // new start from cursor x within whichever lane row, snapped to a step
     const ref = lanesEls[Math.max(0, targetLane)] || lanesEls[0];
     if (ref) {
       const r = ref.getBoundingClientRect();
-      clip.start = snapToHostStep((e.clientX - r.left - arrDragClip.grabDX) / ARR.pxPerSec);
+      clip.startStep = pxToStep(e.clientX - r.left - arrDragClip.grabDX);
     }
 
     // move between lanes if changed
@@ -1408,28 +1425,47 @@
     });
   }
 
-  // Total arrangement length in seconds.
+  // Total arrangement length in seconds, rounded up to a whole host step so the
+  // loop wraps cleanly on the grid.
   function arrLength() {
-    let end = 0;
+    const host_b = activeBoard();
+    let end = boardLen(host_b);   // the host board's own pattern is a layer too
     ARR.lanes.forEach((lane) => lane.forEach((clip) => {
       const b = boardById(clip.boardId);
-      if (b) end = Math.max(end, clip.start + boardLen(b));
+      if (b) end = Math.max(end, clipStartSec(clip) + boardLen(b));
     }));
+    const sd = boardStepDur(host_b);
+    if (sd > 0 && end > 0) end = Math.ceil(end / sd - 1e-6) * sd;
     return end;
+  }
+
+  // Schedule one playthrough of the whole arrangement starting at absolute `at`.
+  // The viewed (host) board's own notes play as a layer alongside its clips.
+  function arrScheduleCycle(at) {
+    scheduleBoard(activeBoard(), at);
+    ARR.lanes.forEach((lane) => lane.forEach((clip) => {
+      const b = boardById(clip.boardId);
+      if (b) scheduleBoard(b, at + clipStartSec(clip));
+    }));
   }
 
   function arrPlay() {
     resume();
     SEQ.playing = true;
     const t0 = ctx.currentTime + 0.08;
-    SEQ.playStart = t0;
-    // Schedule every clip up-front (arrangements are short; one-shot playthrough).
-    ARR.lanes.forEach((lane) => lane.forEach((clip) => {
-      const b = boardById(clip.boardId);
-      if (b) scheduleBoard(b, t0 + clip.start);
-    }));
-    const total = arrLength();
-    SEQ.timer = setTimeout(() => { seqStop(); }, (0.08 + total + 0.5) * 1000);
+    SEQ.playStart = t0;            // anchor of the very first cycle (for playhead)
+    SEQ.arrLoopLen = Math.max(arrLength(), 0.25);
+    let cycleAt = t0;
+
+    arrScheduleCycle(cycleAt);
+
+    // Re-arm each cycle so the viewed board's arrangement keeps looping.
+    const tick = () => {
+      if (!SEQ.playing) return;
+      cycleAt += SEQ.arrLoopLen;
+      arrScheduleCycle(cycleAt);
+    };
+    SEQ.timer = setInterval(tick, SEQ.arrLoopLen * 1000);
     updateSeqButton();
     arrAnimate();
   }
@@ -1442,10 +1478,13 @@
       // draw a single playhead element across lanes
       let ph = host.querySelector('.arrange-playhead');
       if (SEQ.playing && ctx) {
-        const x = (ctx.currentTime - SEQ.playStart) * ARR.pxPerSec;
-        if (x >= 0) {
+        // wrap the playhead to the loop length so it restarts each cycle
+        const elapsed = ctx.currentTime - SEQ.playStart;
+        if (elapsed >= 0) {
+          const loop = SEQ.arrLoopLen || 1;
+          const pos = elapsed % loop;
           if (!ph) { ph = document.createElement('div'); ph.className = 'arrange-playhead'; host.appendChild(ph); }
-          ph.style.left = (x + 12) + 'px';   // +12 ~ lane left padding
+          ph.style.left = (pos * ARR.pxPerSec + 12) + 'px';   // +12 ~ lane left padding
         }
         arrRaf = requestAnimationFrame(frame);
       } else if (ph) {
@@ -1639,8 +1678,8 @@
     // sequencer transport
     $('btn-seq').addEventListener('click', toggleSeq);
     $('btn-clear').addEventListener('click', () => SEQ.notes.clear());
-    bindSlider('s-bpm', 'v-bpm', (n) => { SEQ.bpm = n; });
-    bindSlider('s-steps', 'v-steps', (n) => { setSteps(n); });
+    bindSlider('s-bpm', 'v-bpm', (n) => { SEQ.bpm = n; if (!$('arrange').hidden) renderArrange(); });
+    bindSlider('s-steps', 'v-steps', (n) => { setSteps(n); if (!$('arrange').hidden) renderArrange(); });
     $('roll').addEventListener('mousedown', rollDown);
 
     // piano boards (tabs)
@@ -1652,6 +1691,7 @@
     $('btn-arr-lane').addEventListener('click', addLane);
     $('btn-arr-clear').addEventListener('click', clearArrange);
     renderArrange();
+    window.addEventListener('resize', () => { if (!$('arrange').hidden) renderArrange(); });
 
     document.addEventListener('keydown', onKeyDown);
     document.addEventListener('keyup', onKeyUp);

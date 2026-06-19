@@ -516,7 +516,7 @@ body {
   flex-direction: column;
   gap: 6px;
   min-height: 0;
-  overflow-y: auto;
+  overflow: auto;
   padding: 0 12px 12px;
   position: relative;
   scrollbar-width: thin;
