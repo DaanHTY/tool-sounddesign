@@ -1407,45 +1407,47 @@
   // ============================================================================
 
   // Fire one note (point or sustained chord) of a given board at absolute time.
-  function fireBoardNote(board, note, midi, when) {
+  // `loopEnd` (absolute) cuts the sound off at the loop boundary.
+  function fireBoardNote(board, note, midi, when, loopEnd) {
     const def = VOICE_DEFS[note.voice];
-    if (def.chord) def.playLen(fxInput, when, midi, Math.max(note.len, 1) * boardStepDur(board));
-    else def.play(fxInput, when, voiceParams[note.voice], midi);
+    if (def.chord) {
+      let len = Math.max(note.len, 1) * boardStepDur(board);
+      if (loopEnd != null) len = Math.min(len, loopEnd - when);   // clamp sustain
+      if (len > 0.001) def.playLen(fxInput, when, midi, len);
+    } else {
+      def.play(fxInput, when, voiceParams[note.voice], midi);
+    }
   }
 
   // Schedule a single playthrough of `board` starting at absolute time `at`.
-  function scheduleBoard(board, at) {
+  // Notes that would begin at/after `loopEnd` are dropped (cut off).
+  function scheduleBoard(board, at, loopEnd) {
     const sd = boardStepDur(board);
     board.notes.forEach((note, key) => {
       const colon = key.indexOf(':');
       const step = parseInt(key.slice(0, colon), 10);
       const midi = parseInt(key.slice(colon + 1), 10);
       if (step >= board.steps) return;
-      fireBoardNote(board, note, midi, at + step * sd);
+      const when = at + step * sd;
+      if (loopEnd != null && when >= loopEnd - 0.0005) return;     // past the bar
+      fireBoardNote(board, note, midi, when, loopEnd);
     });
   }
 
-  // Total arrangement length in seconds, rounded up to a whole host step so the
-  // loop wraps cleanly on the grid.
+  // One loop is exactly the viewed board's bar. Anything (clip or note) that
+  // would sound past this is cut off when the loop wraps.
   function arrLength() {
-    const host_b = activeBoard();
-    let end = boardLen(host_b);   // the host board's own pattern is a layer too
-    ARR.lanes.forEach((lane) => lane.forEach((clip) => {
-      const b = boardById(clip.boardId);
-      if (b) end = Math.max(end, clipStartSec(clip) + boardLen(b));
-    }));
-    const sd = boardStepDur(host_b);
-    if (sd > 0 && end > 0) end = Math.ceil(end / sd - 1e-6) * sd;
-    return end;
+    return boardLen(activeBoard());
   }
 
   // Schedule one playthrough of the whole arrangement starting at absolute `at`.
   // The viewed (host) board's own notes play as a layer alongside its clips.
   function arrScheduleCycle(at) {
-    scheduleBoard(activeBoard(), at);
+    const loopEnd = at + arrLength();   // clips/notes are cut off at the bar
+    scheduleBoard(activeBoard(), at, loopEnd);
     ARR.lanes.forEach((lane) => lane.forEach((clip) => {
       const b = boardById(clip.boardId);
-      if (b) scheduleBoard(b, at + clipStartSec(clip));
+      if (b) scheduleBoard(b, at + clipStartSec(clip), loopEnd);
     }));
   }
 
