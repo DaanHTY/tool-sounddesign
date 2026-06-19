@@ -13,10 +13,20 @@
     <aside class="sidebar-column">
       <header class="app-header">
         <h1 class="app-title">Noise Chords</h1>
-        <span class="app-subtitle">White noise → resonant filter bank</span>
+        <span class="app-subtitle">Resonant chords + UI sound palette</span>
       </header>
 
       <div class="sidebar-scroll">
+        <section class="section">
+          <p class="section-label">Palette</p>
+          <div class="btn-grid pads" id="pad-grid"></div>
+        </section>
+
+        <section class="section" id="voice-section">
+          <p class="section-label" id="voice-label">Voice</p>
+          <div id="voice-params"></div>
+        </section>
+
         <section class="section">
           <p class="section-label">Root note</p>
           <div class="btn-grid notes" id="note-grid"></div>
@@ -79,6 +89,30 @@
             <span class="val" id="v-strum">0</span>
           </div>
         </section>
+
+        <section class="section">
+          <p class="section-label">FX</p>
+          <div class="slider-row">
+            <label for="s-drive">Drive</label>
+            <input type="range" id="s-drive" min="0" max="100" step="1" value="0" />
+            <span class="val" id="v-drive">0</span>
+          </div>
+          <div class="slider-row">
+            <label for="s-tone">Tone</label>
+            <input type="range" id="s-tone" min="200" max="18000" step="100" value="18000" />
+            <span class="val" id="v-tone">18k</span>
+          </div>
+          <div class="slider-row">
+            <label for="s-delay">Delay</label>
+            <input type="range" id="s-delay" min="0" max="100" step="1" value="0" />
+            <span class="val" id="v-delay">0</span>
+          </div>
+          <div class="slider-row">
+            <label for="s-space">Space</label>
+            <input type="range" id="s-space" min="0" max="100" step="1" value="0" />
+            <span class="val" id="v-space">0</span>
+          </div>
+        </section>
       </div>
 
       <div class="transport">
@@ -87,15 +121,35 @@
           <button class="btn btn-primary" id="btn-play">Drone</button>
         </div>
         <button class="btn" id="btn-record">● Record</button>
-        <p class="kbd-hint">Keys A–K play roots · Space toggles drone</p>
+        <p class="kbd-hint">A–K play roots · 1–5 fire palette · Space = drone</p>
       </div>
     </aside>
 
-    <!-- Spectrum -->
+    <!-- Sequencer + spectrum -->
     <main class="preview-column">
-      <div class="scope-frame">
+      <div class="roll-transport">
+        <button class="btn roll-btn roll-btn-play" id="btn-seq">▶ Play</button>
+        <button class="btn roll-btn" id="btn-clear">Clear</button>
+        <div class="slider-row mini">
+          <label for="s-bpm">BPM</label>
+          <input type="range" id="s-bpm" min="50" max="220" step="1" value="110" />
+          <span class="val" id="v-bpm">110</span>
+        </div>
+        <div class="slider-row mini">
+          <label for="s-steps">Steps</label>
+          <input type="range" id="s-steps" min="8" max="32" step="4" value="16" />
+          <span class="val" id="v-steps">16</span>
+        </div>
+      </div>
+
+      <div class="roll-frame">
+        <canvas id="roll"></canvas>
+      </div>
+
+      <div class="scope-frame scope-strip">
         <canvas id="scope"></canvas>
       </div>
+
       <div class="scope-readout">
         <div class="readout-item">
           <span class="readout-label">Chord</span>

@@ -126,6 +126,26 @@ body {
   grid-template-columns: repeat(2, 1fr);
 }
 
+.btn-grid.pads {
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.pad {
+  min-height: 46px;
+}
+
+.pad.triggered {
+  background: var(--text);
+  color: var(--accent-fg);
+  transition: none;
+}
+
+#voice-params {
+  display: flex;
+  flex-direction: column;
+  gap: var(--tool-control-gap);
+}
+
 .chip {
   background: var(--surface);
   border: 0;
@@ -270,10 +290,62 @@ body {
   position: relative;
 }
 
-#scope {
+.scope-strip {
+  flex: 0 0 72px;
+}
+
+#scope,
+#roll {
   display: block;
   height: 100%;
   width: 100%;
+}
+
+/* ---- Sequencer transport + piano roll ---- */
+
+.roll-transport {
+  align-items: center;
+  display: flex;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+}
+
+.roll-btn {
+  min-height: 38px;
+  width: auto;
+}
+
+.roll-btn-play {
+  min-width: 96px;
+}
+
+.roll-btn-play.playing {
+  background: var(--error);
+  color: var(--accent-fg);
+}
+
+.slider-row.mini {
+  flex: 1 1 140px;
+  min-width: 120px;
+}
+
+.slider-row.mini label {
+  width: auto;
+}
+
+.roll-frame {
+  background: var(--island-bg);
+  border-radius: var(--radius);
+  clip-path: inset(0 round var(--radius));
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+#roll {
+  cursor: crosshair;
 }
 
 .scope-readout {
