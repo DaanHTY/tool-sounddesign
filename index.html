@@ -16,39 +16,24 @@
         <span class="app-subtitle">Resonant chords + UI sound palette</span>
       </header>
 
-      <div class="sidebar-scroll">
+      <nav class="side-tabs" id="side-tabs">
+        <button class="side-tab" data-stab="timeline">Timeline</button>
+        <button class="side-tab active" data-stab="chord">Palette</button>
+      </nav>
+
+      <div class="sidebar-scroll" id="stab-chord">
         <section class="section">
           <p class="section-label">Palette</p>
           <div class="btn-grid pads" id="pad-grid"></div>
         </section>
 
-        <section class="section" id="voice-section">
-          <p class="section-label" id="voice-label">Voice</p>
-          <div id="voice-params"></div>
-        </section>
-
-        <section class="section">
-          <p class="section-label">Root note</p>
-          <div class="btn-grid notes" id="note-grid"></div>
-        </section>
-
         <section class="section">
           <p class="section-label">Chord</p>
-          <div class="btn-grid chords" id="chord-grid"></div>
-        </section>
-
-        <section class="section">
-          <p class="section-label">Mode</p>
-          <div class="btn-grid" id="mode-grid" style="grid-template-columns: repeat(2, 1fr);"></div>
+          <select class="select" id="chord-select"></select>
         </section>
 
         <section class="section">
           <p class="section-label">Resonator</p>
-          <div class="slider-row">
-            <label for="s-octave">Octave</label>
-            <input type="range" id="s-octave" min="1" max="5" step="1" value="3" />
-            <span class="val" id="v-octave">3</span>
-          </div>
           <div class="slider-row">
             <label for="s-q">Tightness</label>
             <input type="range" id="s-q" min="2" max="500" step="1" value="250" />
@@ -91,7 +76,7 @@
         </section>
 
         <section class="section">
-          <p class="section-label">FX</p>
+          <p class="section-label">Chord FX</p>
           <div class="slider-row">
             <label for="s-drive">Drive</label>
             <input type="range" id="s-drive" min="0" max="100" step="1" value="0" />
@@ -115,13 +100,35 @@
         </section>
       </div>
 
+      <div class="sidebar-scroll" id="stab-timeline" hidden>
+        <section class="section">
+          <p class="section-label">Timeline FX</p>
+          <p class="voice-hint">Applied to the whole timeline output — every block, not just chords.</p>
+          <div class="slider-row">
+            <label for="s-tdrive">Drive</label>
+            <input type="range" id="s-tdrive" min="0" max="100" step="1" value="0" />
+            <span class="val" id="v-tdrive">0</span>
+          </div>
+          <div class="slider-row">
+            <label for="s-ttone">Tone</label>
+            <input type="range" id="s-ttone" min="200" max="18000" step="100" value="18000" />
+            <span class="val" id="v-ttone">18k</span>
+          </div>
+          <div class="slider-row">
+            <label for="s-tdelay">Delay</label>
+            <input type="range" id="s-tdelay" min="0" max="100" step="1" value="0" />
+            <span class="val" id="v-tdelay">0</span>
+          </div>
+          <div class="slider-row">
+            <label for="s-tspace">Space</label>
+            <input type="range" id="s-tspace" min="0" max="100" step="1" value="0" />
+            <span class="val" id="v-tspace">0</span>
+          </div>
+        </section>
+      </div>
+
       <div class="transport">
-        <div class="transport-row">
-          <button class="btn" id="btn-strike">Strike</button>
-          <button class="btn btn-primary" id="btn-play">Drone</button>
-        </div>
-        <button class="btn" id="btn-record">● Record</button>
-        <p class="kbd-hint">A–K play roots · 1–6 fire palette · Space = drone</p>
+        <p class="kbd-hint">A–K play roots · Space = drone</p>
       </div>
     </aside>
 

@@ -76,6 +76,32 @@ body {
   text-transform: uppercase;
 }
 
+.side-tabs {
+  display: flex;
+  flex-shrink: 0;
+  gap: 6px;
+  padding: 16px var(--tool-sidebar-pad) 0;
+}
+
+.side-tab {
+  background: var(--surface);
+  border: 0;
+  border-radius: var(--radius-sm);
+  clip-path: inset(0 round var(--radius-sm));
+  color: var(--text-muted);
+  cursor: pointer;
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  letter-spacing: -0.02em;
+  min-height: 34px;
+  text-transform: uppercase;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.side-tab:hover { background: var(--surface-input); color: var(--text); }
+.side-tab.active { background: var(--text); color: var(--accent-fg); }
+
 .sidebar-scroll {
   display: flex;
   flex: 1;
@@ -88,6 +114,8 @@ body {
   scrollbar-width: none;
   -ms-overflow-style: none;
 }
+
+.sidebar-scroll[hidden] { display: none; }
 
 .sidebar-scroll::-webkit-scrollbar {
   display: none;
@@ -184,6 +212,45 @@ body {
   color: var(--accent-fg);
 }
 
+/* ---- Select dropdown ------------------------------------------------------ */
+
+.select {
+  appearance: none;
+  -webkit-appearance: none;
+  background-color: var(--surface);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23999' stroke-width='1.5'/%3E%3C/svg%3E");
+  background-position: right 12px center;
+  background-repeat: no-repeat;
+  border: 0;
+  border-radius: var(--radius-sm);
+  clip-path: inset(0 round var(--radius-sm));
+  color: var(--text);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  letter-spacing: -0.02em;
+  min-height: 38px;
+  padding: 8px 30px 8px 12px;
+  text-transform: uppercase;
+  transition: background-color 0.15s ease;
+  width: 100%;
+}
+
+.select:hover {
+  background-color: var(--surface-input);
+}
+
+.select:focus {
+  outline: 1px solid var(--text-muted);
+  outline-offset: -1px;
+}
+
+.select option {
+  background: var(--island-bg);
+  color: var(--text);
+  text-transform: none;
+}
+
 /* ---- Sliders -------------------------------------------------------------- */
 
 .slider-row label {
@@ -247,23 +314,6 @@ body {
 .btn-primary.playing {
   background: var(--error);
   color: var(--accent-fg);
-}
-
-.transport-row {
-  display: grid;
-  gap: var(--tool-control-gap);
-  grid-template-columns: 1fr 1fr;
-}
-
-#btn-record.recording {
-  background: var(--error);
-  color: var(--accent-fg);
-  animation: rec-pulse 1s ease-in-out infinite;
-}
-
-@keyframes rec-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.55; }
 }
 
 .kbd-hint {
