@@ -83,6 +83,8 @@
     // synth voice (osc + noise blend)
     // defaults recreate the old "plop": sine, fast pitch drop, short AD
     syWave: 'sine',
+    syVoices: 1,       // unison voices (1 = off); detuned copies of the osc
+    syDetune: 15,      // unison spread in cents across the voices
     syDrop: 12,        // start this many semitones above, glide down to pitch
     syDropTime: 9,     // ms for the glide
     syNoise: 0,        // 0 = pure osc, 100 = pure noise
@@ -115,6 +117,7 @@
   let chordFX = null;
   let masterSum = null;      // == timelineFX.input
   let timelineFX = null;
+  let autoGain = null;       // timeline gain-automation lane rides here
   let masterGain = null;
   let limiter = null;
   let analyser = null;
@@ -286,6 +289,27 @@
 
   const SHAPER_KINDS = ['soft', 'tube', 'hard', 'fold', 'fuzz'];
   const SHAPER_LABELS = ['Soft', 'Tube', 'Hard', 'Fold', 'Fuzz'];
+
+  // LFO targets + shapes for the modulation effect.
+  const LFO_TARGETS = ['Filter', 'Volume', 'Pan'];
+  const LFO_SHAPES = ['sine', 'triangle', 'square', 'sawtooth'];
+  const LFO_SHAPE_LABELS = ['Sine', 'Triangle', 'Square', 'Ramp', 'Random'];
+
+  // A looping buffer of stepped random values, played back at the LFO rate to
+  // get sample-and-hold ("random") modulation. `steps` random plateaus over one
+  // second; the source's playbackRate is later set so one loop == one LFO cycle.
+  function makeRandomStepBuffer(steps) {
+    const sr = ctx.sampleRate;
+    const buffer = ctx.createBuffer(1, sr, sr);
+    const data = buffer.getChannelData(0);
+    const seg = Math.floor(sr / steps);
+    let v = Math.random() * 2 - 1;
+    for (let i = 0; i < sr; i++) {
+      if (i % seg === 0) v = Math.random() * 2 - 1;
+      data[i] = v;
+    }
+    return buffer;
+  }
 
   // ---- EQ visualization -----------------------------------------------------
   //
@@ -761,6 +785,111 @@
       visual: distortionVisual,
     },
 
+    lfo: {
+      label: 'LFO / Movement',
+      // A low-frequency oscillator that sweeps a target over time — the
+      // ingredient that makes sounds "watery", "shimmery" or "breathing".
+      //   Filter — sweeps a lowpass cutoff (auto-wah / underwater wobble)
+      //   Volume — amplitude tremolo
+      //   Pan    — auto-pan across the stereo field
+      params: [
+        { group: 'Motion' },
+        { k: 'target', label: 'Target', min: 0, max: 2, step: 1, def: 0,
+          fmt: (n) => LFO_TARGETS[n] || 'Filter' },
+        { k: 'shape',  label: 'Shape',  min: 0, max: 4, step: 1, def: 0,
+          fmt: (n) => LFO_SHAPE_LABELS[n] || 'Sine' },
+        { k: 'rate',   label: 'Rate',   min: 0.05, max: 12, step: 0.05, def: 1.2,
+          fmt: (n) => n.toFixed(2) + 'Hz' },
+        { k: 'depth',  label: 'Depth',  min: 0, max: 100, step: 1, def: 60, fmt: pct },
+        { group: 'Filter' },
+        { k: 'center', label: 'Center', min: 100, max: 12000, step: 50, def: 1200, fmt: fHz },
+        { k: 'reso',   label: 'Reso',   min: 0.5, max: 18, step: 0.5, def: 6,
+          fmt: (n) => n.toFixed(1) },
+      ],
+      build() {
+        const input = ctx.createGain();
+        const output = ctx.createGain();
+
+        // The LFO source: an oscillator for the periodic shapes, swapped for a
+        // looping random-step buffer when shape === Random. Both feed `depth`.
+        const depth = ctx.createGain();
+        let osc = null, rnd = null;
+        const startSources = (shapeIdx, rate) => {
+          stopSources();
+          if (shapeIdx >= LFO_SHAPES.length) {           // Random (sample & hold)
+            rnd = ctx.createBufferSource();
+            rnd.buffer = makeRandomStepBuffer(8);
+            rnd.loop = true;
+            rnd.playbackRate.value = rate;               // 1 loop == 1 cycle
+            rnd.connect(depth);
+            rnd.start();
+          } else {
+            osc = ctx.createOscillator();
+            osc.type = LFO_SHAPES[shapeIdx];
+            osc.frequency.value = rate;
+            osc.connect(depth);
+            osc.start();
+          }
+        };
+        function stopSources() {
+          if (osc) { try { osc.stop(); osc.disconnect(); } catch (e) {} osc = null; }
+          if (rnd) { try { rnd.stop(); rnd.disconnect(); } catch (e) {} rnd = null; }
+        }
+
+        // Per-target audio nodes (built once, wired on demand).
+        const filter = ctx.createBiquadFilter(); filter.type = 'lowpass';
+        const amp = ctx.createGain();            // tremolo: gain rides 1±depth
+        const panner = ctx.createStereoPanner();
+
+        let curTarget = -1, curShape = -1;
+        function apply(p) {
+          const t = ctx.currentTime;
+
+          // (Re)create the LFO source if the shape changed; always retune rate.
+          if (p.shape !== curShape) { startSources(p.shape, p.rate); curShape = p.shape; }
+          if (osc) osc.frequency.setTargetAtTime(p.rate, t, 0.02);
+          if (rnd) rnd.playbackRate.setTargetAtTime(p.rate, t, 0.02);
+
+          // Rewire the audio path + LFO destination when the target changes.
+          if (p.target !== curTarget) {
+            try { input.disconnect(); } catch (e) {}
+            try { filter.disconnect(); amp.disconnect(); panner.disconnect(); } catch (e) {}
+            try { depth.disconnect(); } catch (e) {}
+            if (p.target === 1) {                 // Volume (tremolo)
+              amp.gain.value = 1;
+              input.connect(amp); amp.connect(output);
+              depth.connect(amp.gain);
+            } else if (p.target === 2) {          // Pan
+              panner.pan.value = 0;
+              input.connect(panner); panner.connect(output);
+              depth.connect(panner.pan);
+            } else {                              // Filter (auto-wah / watery)
+              input.connect(filter); filter.connect(output);
+              depth.connect(filter.frequency);
+            }
+            curTarget = p.target;
+          }
+
+          const d = p.depth / 100;
+          if (p.target === 1) {
+            // Tremolo: oscillate gain by ±d around unity, floored above 0.
+            amp.gain.setTargetAtTime(1 - d * 0.5, t, 0.02);
+            depth.gain.setTargetAtTime(d * 0.5, t, 0.02);
+          } else if (p.target === 2) {
+            depth.gain.setTargetAtTime(d, t, 0.02);   // pan swings ±depth
+          } else {
+            filter.frequency.setTargetAtTime(p.center, t, 0.02);
+            filter.Q.setTargetAtTime(p.reso, t, 0.02);
+            // Sweep amount scales with both depth and how high the center is, so
+            // it stays musical low and dramatic high.
+            depth.gain.setTargetAtTime(d * p.center * 0.9, t, 0.02);
+          }
+        }
+        function dispose() { stopSources(); }
+        return { input, output, apply, dispose };
+      },
+    },
+
     pitch: {
       label: 'Pitch Shift',
       params: [
@@ -811,7 +940,7 @@
   };
 
   // Order effect types appear in the picker.
-  const FX_ORDER = ['reverb', 'delay', 'comp', 'eq', 'distortion', 'pitch'];
+  const FX_ORDER = ['reverb', 'delay', 'comp', 'eq', 'distortion', 'lfo', 'pitch'];
 
   // Default params object for a fresh instance of `type`.
   function fxDefaults(type) {
@@ -878,6 +1007,9 @@
     rebuildRack('chord');
     rebuildRack('timeline');
 
+    autoGain = ctx.createGain();
+    autoGain.gain.value = 1;       // unity until an automation lane schedules it
+
     masterGain = ctx.createGain();
     masterGain.gain.value = state.volume;
 
@@ -898,7 +1030,8 @@
     resoBus.connect(fxInput);
     dryGain.connect(fxInput);
     chordFX.out.connect(masterSum);
-    timelineFX.out.connect(masterGain);
+    timelineFX.out.connect(autoGain);
+    autoGain.connect(masterGain);
     masterGain.connect(limiter);
     limiter.connect(analyser);
     analyser.connect(ctx.destination);
@@ -973,8 +1106,8 @@
   // FX (drive/tone/delay/space) is captured for every voice.
   const VOICE_SNAP_KEYS = {
     Chord: ['chord', 'q', 'gain', 'noise', 'volume', 'attack', 'release', 'strum'],
-    Synth: ['syWave', 'syDrop', 'syDropTime', 'syNoise', 'syCutoff',
-            'syAttack', 'syDecay', 'syRelease', 'syLevel'],
+    Synth: ['syWave', 'syVoices', 'syDetune', 'syDrop', 'syDropTime',
+            'syNoise', 'syCutoff', 'syAttack', 'syDecay', 'syRelease', 'syLevel'],
   };
 
   // Deep-copy the live chord FX rack so each placed block freezes its own copy
@@ -1079,15 +1212,28 @@
     const fx = buildRackChain(p.rack || []);
     fx.output.connect(dest);
 
-    // tone + noise blended into one filtered amp envelope
-    const osc = ctx.createOscillator();
-    osc.type = p.syWave;
-    osc.frequency.setValueAtTime(startFreq, t);
-    if (p.syDrop !== 0) {
-      osc.frequency.exponentialRampToValueAtTime(baseFreq, t + Math.max(p.syDropTime / 1000, 0.001));
-    }
+    // tone + noise blended into one filtered amp envelope. The tone is a unison
+    // stack of `syVoices` oscillators spread evenly across ±syDetune/2 cents,
+    // power-summed (1/sqrt(n)) so adding voices doesn't blow up the level.
+    const voices = Math.max(1, p.syVoices | 0);
+    const dropEnd = t + Math.max(p.syDropTime / 1000, 0.001);
+    const oscs = [];
     const oscGain = ctx.createGain();
-    oscGain.gain.value = 1 - p.syNoise / 100;
+    oscGain.gain.value = (1 - p.syNoise / 100) / Math.sqrt(voices);
+    for (let v = 0; v < voices; v++) {
+      // -1..+1 across the stack; single voice sits dead center.
+      const spread = voices > 1 ? (v / (voices - 1)) * 2 - 1 : 0;
+      const cents = spread * (p.syDetune / 2);
+      const osc = ctx.createOscillator();
+      osc.type = p.syWave;
+      osc.detune.value = cents;
+      osc.frequency.setValueAtTime(startFreq, t);
+      if (p.syDrop !== 0) {
+        osc.frequency.exponentialRampToValueAtTime(baseFreq, dropEnd);
+      }
+      osc.connect(oscGain);
+      oscs.push(osc);
+    }
 
     const nz = ctx.createBufferSource();
     nz.buffer = noiseBuf;
@@ -1107,11 +1253,11 @@
     amp.gain.setValueAtTime(Math.max(sustain, 0.0002), tHoldEnd);
     amp.gain.linearRampToValueAtTime(0.0001, tEnd);
 
-    osc.connect(oscGain); oscGain.connect(lp);
+    oscGain.connect(lp);
     nz.connect(nzGain); nzGain.connect(lp);
     lp.connect(amp); amp.connect(fx.input);
 
-    osc.start(t); osc.stop(tEnd + 0.05);
+    oscs.forEach((osc) => { osc.start(t); osc.stop(tEnd + 0.05); });
     nz.start(t); nz.stop(tEnd + 0.05);
 
     const tail = tEnd + 2.5;
@@ -1537,6 +1683,9 @@
       steps: 16,
       bpm: 110,
       arrange: [[]],      // this board's OWN arrangement: array of lanes of clips
+      // Gain automation breakpoints over the pattern: [{step, value}], step in
+      // 0..steps, value 0..1.5 (1 = unity). Empty = no automation (flat unity).
+      automation: { gain: [] },
     };
   }
 
@@ -1559,7 +1708,122 @@
     set steps(v) { activeBoard().steps = v; },
     get bpm() { return activeBoard().bpm; },
     set bpm(v) { activeBoard().bpm = v; },
+    get automation() { return activeBoard().automation; },
   };
+
+  // Automation lane occupies the bottom strip of the roll, shown only in Auto
+  // mode. Constants for the lane geometry and value range.
+  const AUTO = {
+    on: false,                 // edit mode toggle
+    laneH: 76,                 // px height of the lane strip at the canvas bottom
+    valMax: 1.5,               // top of the lane = +3.5dB-ish boost; bottom = silence
+    drag: null,                // active breakpoint drag, or null
+  };
+  // Sort + de-dupe breakpoints by step so scheduling/drawing read left→right.
+  function autoPoints() {
+    const pts = SEQ.automation.gain;
+    pts.sort((a, b) => a.step - b.step);
+    return pts;
+  }
+  // Linear-interpolated automation value at a fractional step (1 if no points).
+  function autoValueAt(step) {
+    const pts = autoPoints();
+    if (!pts.length) return 1;
+    if (step <= pts[0].step) return pts[0].value;
+    if (step >= pts[pts.length - 1].step) return pts[pts.length - 1].value;
+    for (let i = 1; i < pts.length; i++) {
+      if (step <= pts[i].step) {
+        const a = pts[i - 1], b = pts[i];
+        const f = (step - a.step) / (b.step - a.step || 1);
+        return a.value + (b.value - a.value) * f;
+      }
+    }
+    return pts[pts.length - 1].value;
+  }
+
+  // Lane geometry: the bottom AUTO.laneH px of the roll plot. Returns the
+  // top y of the lane and helpers to convert between px and (step, value).
+  function autoLaneGeom(canvas) {
+    const g = rollGeom(canvas);
+    const top = g.H - AUTO.laneH;
+    return {
+      top, bottom: g.H, gut: g.gut, plotW: g.plotW, stepW: g.stepW,
+      // step (fractional, clamped 0..steps) from an x pixel
+      stepFromX: (x) => Math.max(0, Math.min(SEQ.steps, (x - g.gut) / g.stepW)),
+      xFromStep: (s) => g.gut + s * g.stepW,
+      // value (0..valMax) from a y pixel; top of lane = valMax, bottom = 0
+      valFromY: (y) => Math.max(0, Math.min(AUTO.valMax,
+        AUTO.valMax * (1 - (y - top) / AUTO.laneH))),
+      yFromVal: (v) => top + AUTO.laneH * (1 - v / AUTO.valMax),
+    };
+  }
+
+  // Pick the nearest breakpoint within `tol` px of (x,y), or null.
+  function autoPickPoint(canvas, x, y, tol) {
+    const lg = autoLaneGeom(canvas);
+    let best = null, bestD = tol * tol;
+    autoPoints().forEach((p, i) => {
+      const px = lg.xFromStep(p.step), py = lg.yFromVal(p.value);
+      const d = (px - x) * (px - x) + (py - y) * (py - y);
+      if (d <= bestD) { bestD = d; best = { p, i }; }
+    });
+    return best;
+  }
+
+  // Mousedown inside the automation lane: grab an existing point or add one.
+  // Returns true if the event was handled (so note-painting is skipped).
+  function autoDown(e) {
+    const canvas = $('roll');
+    const r = canvas.getBoundingClientRect();
+    const x = e.clientX - r.left, y = e.clientY - r.top;
+    const lg = autoLaneGeom(canvas);
+    if (y < lg.top) return false;            // not in the lane → let notes handle it
+
+    const hit = autoPickPoint(canvas, x, y, 9);
+    let point;
+    if (hit) {
+      point = hit.p;
+    } else {
+      point = { step: lg.stepFromX(x), value: lg.valFromY(y) };
+      SEQ.automation.gain.push(point);
+    }
+    AUTO.drag = point;
+    if (SEQ.playing) scheduleAutomation(ctx.currentTime, 512);
+    window.addEventListener('mousemove', autoMove);
+    window.addEventListener('mouseup', autoUp);
+    return true;
+  }
+
+  function autoMove(e) {
+    if (!AUTO.drag) return;
+    const canvas = $('roll');
+    const r = canvas.getBoundingClientRect();
+    const lg = autoLaneGeom(canvas);
+    AUTO.drag.step = lg.stepFromX(e.clientX - r.left);
+    AUTO.drag.value = lg.valFromY(e.clientY - r.top);
+    if (SEQ.playing) scheduleAutomation(ctx.currentTime, 512);
+  }
+
+  function autoUp() {
+    AUTO.drag = null;
+    window.removeEventListener('mousemove', autoMove);
+    window.removeEventListener('mouseup', autoUp);
+  }
+
+  // Double-click a breakpoint to delete it. Returns true if handled.
+  function autoDblClick(e) {
+    const canvas = $('roll');
+    const r = canvas.getBoundingClientRect();
+    const x = e.clientX - r.left, y = e.clientY - r.top;
+    const lg = autoLaneGeom(canvas);
+    if (y < lg.top) return false;
+    const hit = autoPickPoint(canvas, x, y, 10);
+    if (hit) {
+      SEQ.automation.gain.splice(hit.i, 1);
+      if (SEQ.playing) scheduleAutomation(ctx.currentTime, 512);
+    }
+    return true;                              // swallow dblclick in the lane either way
+  }
 
   const BLACK = { 1: 1, 3: 1, 6: 1, 8: 1, 10: 1 };
   const isBlack = (m) => BLACK[((m % 12) + 12) % 12];
@@ -1613,12 +1877,34 @@
     }
   }
 
+  // Schedule the gain-automation curve as a sequence of linear ramps over one
+  // pattern, repeated `cycles` times starting at `startTime`. Sampled per step
+  // (plus the breakpoints themselves) so curves between sparse points are smooth.
+  function scheduleAutomation(startTime, cycles) {
+    if (!autoGain) return;
+    const g = autoGain.gain;
+    g.cancelScheduledValues(startTime);
+    const pts = autoPoints();
+    if (!pts.length) { g.setValueAtTime(1, startTime); return; }
+    const cycleLen = SEQ.steps * stepDur();
+    g.setValueAtTime(Math.max(autoValueAt(0), 0.0001), startTime);
+    for (let c = 0; c < cycles; c++) {
+      const base = startTime + c * cycleLen;
+      for (let s = 1; s <= SEQ.steps; s++) {
+        const v = Math.max(autoValueAt(s), 0.0001);
+        g.linearRampToValueAtTime(v, base + s * stepDur());
+      }
+    }
+  }
+
   function seqPlay() {
     resume();
     SEQ.playing = true;
     SEQ.currentStep = 0;
     SEQ.nextTime = ctx.currentTime + 0.06;
     SEQ.playStart = SEQ.nextTime;
+    // Pre-schedule a long run of automation cycles; re-armed if it ever runs out.
+    scheduleAutomation(SEQ.playStart, 512);
     SEQ.timer = setInterval(seqScheduler, 25);
     updateSeqButton();
   }
@@ -1626,6 +1912,11 @@
   function seqStop() {
     SEQ.playing = false;
     if (SEQ.timer) { clearInterval(SEQ.timer); clearTimeout(SEQ.timer); SEQ.timer = null; }
+    if (autoGain) {
+      const t = ctx ? ctx.currentTime : 0;
+      autoGain.gain.cancelScheduledValues(t);
+      autoGain.gain.setTargetAtTime(1, t, 0.02);   // glide back to unity
+    }
     updateSeqButton();
   }
 
@@ -1650,6 +1941,8 @@
       if (step >= n) SEQ.notes.delete(key);
       else if (step + note.len > n) note.len = n - step;   // clamp overhang
     });
+    // Keep automation breakpoints within the new pattern length.
+    SEQ.automation.gain.forEach((p) => { if (p.step > n) p.step = n; });
   }
 
   // ---- Piano boards (tabs) --------------------------------------------------
@@ -2148,6 +2441,8 @@
 
     if (p.voice === 'Synth') {
       setSel('sy-wave', p.syWave);
+      set('sy-voices', p.syVoices);
+      set('sy-detune', p.syDetune);
       set('sy-drop', p.syDrop);
       set('sy-droptime', p.syDropTime);
       set('sy-noise', p.syNoise);
@@ -2485,6 +2780,8 @@
   }
 
   function rollDown(e) {
+    // In Auto mode, the bottom lane edits the gain curve instead of notes.
+    if (AUTO.on && autoDown(e)) return;
     const canvas = $('roll');
     const c = cellAt(canvas, e.clientX, e.clientY);
     const voice = state.selectedVoice || PALETTE[0];
@@ -2584,6 +2881,7 @@
 
   // Double-click a note to delete it.
   function rollDblClick(e) {
+    if (AUTO.on && autoDblClick(e)) return;
     const canvas = $('roll');
     const c = cellAt(canvas, e.clientX, e.clientY);
     if (c.inGutter || !c.inRange) return;
@@ -2668,6 +2966,59 @@
         }
       });
 
+      // gain-automation lane (drawn when editing, or whenever points exist)
+      const autoPts = SEQ.automation.gain;
+      if (AUTO.on || autoPts.length) {
+        const lg = autoLaneGeom(canvas);
+        // lane backdrop
+        g.fillStyle = AUTO.on ? 'rgba(80,160,255,0.10)' : 'rgba(80,160,255,0.05)';
+        g.fillRect(lg.gut, lg.top, lg.plotW, AUTO.laneH);
+        g.strokeStyle = 'rgba(80,160,255,0.35)';
+        g.lineWidth = 1;
+        g.beginPath(); g.moveTo(lg.gut, lg.top); g.lineTo(W, lg.top); g.stroke();
+        // unity (0 dB) reference line
+        const yUnity = lg.yFromVal(1);
+        g.strokeStyle = 'rgba(255,255,255,0.18)';
+        g.setLineDash([3, 3]);
+        g.beginPath(); g.moveTo(lg.gut, yUnity); g.lineTo(W, yUnity); g.stroke();
+        g.setLineDash([]);
+        g.fillStyle = 'rgba(120,180,255,0.6)';
+        g.font = "9px 'Suisse Intl Mono', monospace";
+        g.fillText('GAIN', lg.gut + 4, lg.top + 11);
+
+        if (autoPts.length) {
+          const sorted = autoPoints();
+          // filled curve under the line
+          g.beginPath();
+          g.moveTo(lg.xFromStep(sorted[0].step), lg.bottom);
+          g.lineTo(lg.xFromStep(sorted[0].step), lg.yFromVal(sorted[0].value));
+          sorted.forEach((p) => g.lineTo(lg.xFromStep(p.step), lg.yFromVal(p.value)));
+          const last = sorted[sorted.length - 1];
+          g.lineTo(lg.xFromStep(last.step), lg.bottom);
+          g.closePath();
+          g.fillStyle = 'rgba(80,160,255,0.18)';
+          g.fill();
+          // the curve line
+          g.beginPath();
+          sorted.forEach((p, i) => {
+            const x = lg.xFromStep(p.step), y = lg.yFromVal(p.value);
+            i ? g.lineTo(x, y) : g.moveTo(x, y);
+          });
+          g.strokeStyle = 'rgba(120,190,255,0.9)';
+          g.lineWidth = 2; g.stroke();
+          // breakpoint handles (bigger/brighter while editing)
+          sorted.forEach((p) => {
+            const x = lg.xFromStep(p.step), y = lg.yFromVal(p.value);
+            g.beginPath();
+            g.arc(x, y, AUTO.on ? 4 : 2.5, 0, Math.PI * 2);
+            g.fillStyle = '#bfe0ff'; g.fill();
+          });
+        } else if (AUTO.on) {
+          g.fillStyle = 'rgba(180,210,255,0.5)';
+          g.fillText('click to add gain points · double-click to remove', lg.gut + 40, lg.top + 11);
+        }
+      }
+
       // playhead
       if (SEQ.playing && ctx) {
         const elapsed = ctx.currentTime - SEQ.playStart;
@@ -2701,6 +3052,8 @@
     const fSemi = (n) => (n > 0 ? '+' : '') + n;
 
     // Synth voice — osc + noise blend (frozen onto the block when placed/edited)
+    bindSlider('sy-voices', 'vy-voices', (n) => { state.syVoices = n; mirrorToEditing(); });
+    bindSlider('sy-detune', 'vy-detune', (n) => { state.syDetune = n; mirrorToEditing(); }, (n) => n + 'c');
     bindSlider('sy-drop', 'vy-drop', (n) => { state.syDrop = n; mirrorToEditing(); }, fSemi);
     bindSlider('sy-droptime', 'vy-droptime', (n) => { state.syDropTime = n; mirrorToEditing(); }, (n) => n + 'ms');
     bindSlider('sy-noise', 'vy-noise', (n) => { state.syNoise = n; mirrorToEditing(); });
@@ -2726,7 +3079,15 @@
 
     // sequencer transport
     $('btn-seq').addEventListener('click', toggleSeq);
-    $('btn-clear').addEventListener('click', () => { SEQ.notes.clear(); state.editingKey = null; });
+    $('btn-clear').addEventListener('click', () => {
+      // In Auto mode, Clear wipes the automation lane; otherwise the notes.
+      if (AUTO.on) { SEQ.automation.gain.length = 0; }
+      else { SEQ.notes.clear(); state.editingKey = null; }
+    });
+    $('btn-auto').addEventListener('click', () => {
+      AUTO.on = !AUTO.on;
+      $('btn-auto').classList.toggle('active', AUTO.on);
+    });
     bindSlider('s-bpm', 'v-bpm', (n) => { SEQ.bpm = n; if (!$('arrange').hidden) renderArrange(); });
     bindSlider('s-steps', 'v-steps', (n) => { setSteps(n); if (!$('arrange').hidden) renderArrange(); });
     $('roll').addEventListener('mousedown', rollDown);

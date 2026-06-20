@@ -87,6 +87,16 @@
               <select class="select" id="sy-wave"></select>
             </div>
             <div class="slider-row">
+              <label for="sy-voices">Unison</label>
+              <input type="range" id="sy-voices" min="1" max="7" step="1" value="1" />
+              <span class="val" id="vy-voices">1</span>
+            </div>
+            <div class="slider-row">
+              <label for="sy-detune">Detune</label>
+              <input type="range" id="sy-detune" min="0" max="50" step="1" value="15" />
+              <span class="val" id="vy-detune">15</span>
+            </div>
+            <div class="slider-row">
               <label for="sy-drop">Drop</label>
               <input type="range" id="sy-drop" min="0" max="36" step="1" value="12" />
               <span class="val" id="vy-drop">12</span>
@@ -161,6 +171,7 @@
       <div class="roll-transport">
         <button class="btn roll-btn roll-btn-play" id="btn-seq">▶ Play</button>
         <button class="btn roll-btn" id="btn-clear">Clear</button>
+        <button class="btn roll-btn" id="btn-auto" title="Draw a gain automation curve along the bottom of the roll">Gain Auto</button>
         <div class="slider-row mini">
           <label for="s-bpm">BPM</label>
           <input type="range" id="s-bpm" min="50" max="220" step="1" value="110" />

@@ -396,6 +396,12 @@ body {
   color: var(--accent-fg);
 }
 
+/* Gain-automation edit mode toggle */
+.roll-btn.active {
+  background: rgba(80, 160, 255, 0.9);
+  color: var(--accent-fg);
+}
+
 .slider-row.mini {
   flex: 1 1 140px;
   min-width: 120px;
