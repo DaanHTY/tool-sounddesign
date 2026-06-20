@@ -1716,19 +1716,45 @@
   const AUTO = {
     on: false,                 // edit mode toggle
     laneH: 76,                 // px height of the lane strip at the canvas bottom
-    valMax: 1.5,               // top of the lane = +3.5dB-ish boost; bottom = silence
+    // Breakpoint `value` is stored in DECIBELS so the lane is perceptually even
+    // — equal vertical travel = equal loudness change — and ramps drawn as
+    // straight lines sound like smooth fades. dbTop = top of lane (boost),
+    // dbFloor = the pixel just above the bottom; the bottom rail snaps to silence.
+    dbTop: 6,
+    dbFloor: -40,
     drag: null,                // active breakpoint drag, or null
   };
-  // Sort + de-dupe breakpoints by step so scheduling/drawing read left→right.
-  function autoPoints() {
-    const pts = SEQ.automation.gain;
+  // dB → linear gain, with anything at/below the floor treated as true silence.
+  const autoDbToGain = (db) => (db <= AUTO.dbFloor ? 0 : Math.pow(10, db / 20));
+
+  // The breakpoint array the lane currently edits/draws: the SELECTED block's
+  // own curve when a block is selected, otherwise the board's timeline curve.
+  // The selected block carries its own gain ride (note.automation); deselect to
+  // ride the whole timeline. note.automation is lazily created on first edit.
+  function autoTargetArr() {
+    if (state.editingKey) {
+      const note = SEQ.notes.get(state.editingKey);
+      if (note) {
+        if (!note.automation) note.automation = [];
+        return note.automation;
+      }
+    }
+    return SEQ.automation.gain;
+  }
+  // Is the lane currently editing a per-block curve (vs the timeline)?
+  const autoEditingBlock = () => !!(state.editingKey && SEQ.notes.get(state.editingKey));
+
+  // Sort breakpoints by step so scheduling/drawing read left→right.
+  function autoPoints(arr) {
+    const pts = arr || autoTargetArr();
     pts.sort((a, b) => a.step - b.step);
     return pts;
   }
-  // Linear-interpolated automation value at a fractional step (1 if no points).
-  function autoValueAt(step) {
-    const pts = autoPoints();
-    if (!pts.length) return 1;
+  // dB value of a curve at a fractional step (0 dB = unity if no points).
+  // Interpolation is linear in dB — perceptually even, like a real fader ride.
+  function autoDbAt(step, arr) {
+    const pts = autoPoints(arr);
+    if (!pts.length) return 0;
     if (step <= pts[0].step) return pts[0].value;
     if (step >= pts[pts.length - 1].step) return pts[pts.length - 1].value;
     for (let i = 1; i < pts.length; i++) {
@@ -1740,6 +1766,8 @@
     }
     return pts[pts.length - 1].value;
   }
+  // Linear gain the audio graph wants at a fractional step (for a given curve).
+  const autoValueAt = (step, arr) => autoDbToGain(autoDbAt(step, arr));
 
   // Lane geometry: the bottom AUTO.laneH px of the roll plot. Returns the
   // top y of the lane and helpers to convert between px and (step, value).
@@ -1751,10 +1779,15 @@
       // step (fractional, clamped 0..steps) from an x pixel
       stepFromX: (x) => Math.max(0, Math.min(SEQ.steps, (x - g.gut) / g.stepW)),
       xFromStep: (s) => g.gut + s * g.stepW,
-      // value (0..valMax) from a y pixel; top of lane = valMax, bottom = 0
-      valFromY: (y) => Math.max(0, Math.min(AUTO.valMax,
-        AUTO.valMax * (1 - (y - top) / AUTO.laneH))),
-      yFromVal: (v) => top + AUTO.laneH * (1 - v / AUTO.valMax),
+      // dB from a y pixel; top of lane = dbTop, bottom = dbFloor (→ silence)
+      dbFromY: (y) => {
+        const f = 1 - (y - top) / AUTO.laneH;          // 0 bottom .. 1 top
+        return AUTO.dbFloor + Math.max(0, Math.min(1, f)) * (AUTO.dbTop - AUTO.dbFloor);
+      },
+      yFromDb: (db) => {
+        const f = (db - AUTO.dbFloor) / (AUTO.dbTop - AUTO.dbFloor);
+        return top + AUTO.laneH * (1 - Math.max(0, Math.min(1, f)));
+      },
     };
   }
 
@@ -1763,7 +1796,7 @@
     const lg = autoLaneGeom(canvas);
     let best = null, bestD = tol * tol;
     autoPoints().forEach((p, i) => {
-      const px = lg.xFromStep(p.step), py = lg.yFromVal(p.value);
+      const px = lg.xFromStep(p.step), py = lg.yFromDb(p.value);
       const d = (px - x) * (px - x) + (py - y) * (py - y);
       if (d <= bestD) { bestD = d; best = { p, i }; }
     });
@@ -1784,8 +1817,8 @@
     if (hit) {
       point = hit.p;
     } else {
-      point = { step: lg.stepFromX(x), value: lg.valFromY(y) };
-      SEQ.automation.gain.push(point);
+      point = { step: lg.stepFromX(x), value: lg.dbFromY(y) };
+      autoTargetArr().push(point);
     }
     AUTO.drag = point;
     if (SEQ.playing) scheduleAutomation(ctx.currentTime, 512);
@@ -1800,7 +1833,7 @@
     const r = canvas.getBoundingClientRect();
     const lg = autoLaneGeom(canvas);
     AUTO.drag.step = lg.stepFromX(e.clientX - r.left);
-    AUTO.drag.value = lg.valFromY(e.clientY - r.top);
+    AUTO.drag.value = lg.dbFromY(e.clientY - r.top);
     if (SEQ.playing) scheduleAutomation(ctx.currentTime, 512);
   }
 
@@ -1819,7 +1852,7 @@
     if (y < lg.top) return false;
     const hit = autoPickPoint(canvas, x, y, 10);
     if (hit) {
-      SEQ.automation.gain.splice(hit.i, 1);
+      autoTargetArr().splice(hit.i, 1);
       if (SEQ.playing) scheduleAutomation(ctx.currentTime, 512);
     }
     return true;                              // swallow dblclick in the lane either way
@@ -1860,10 +1893,32 @@
       if (parseInt(key.slice(0, colon), 10) !== step) return;
       const midi = parseInt(key.slice(colon + 1), 10);
       const def = VOICE_DEFS[note.voice];
+      const len = Math.max(note.len, 1);
+      const lenSec = len * stepDur();
+
+      // Normal destination bus for this voice. If the block carries its own gain
+      // automation, splice a per-block gain node in front of the bus and ride
+      // the block's curve on it for this play pass only.
+      let dest = def.chord ? masterSum : fxInput;
+      let blkGain = null;
+      if (note.automation && note.automation.length) {
+        blkGain = ctx.createGain();
+        blkGain.connect(dest);
+        scheduleBlockAutomation(blkGain, note.automation, step, len, when);
+        dest = blkGain;
+      }
+
       if (def.chord) {
-        def.playLen(masterSum, when, midi, Math.max(note.len, 1) * stepDur(), note.fx);
+        def.playLen(dest, when, midi, lenSec, note.fx);
       } else {
-        def.play(fxInput, when, voiceParams[note.voice], midi);
+        def.play(dest, when, voiceParams[note.voice], midi);
+      }
+
+      // Tear down the per-block gain node after the block (plus a tail) ends.
+      if (blkGain) {
+        const tail = (when - ctx.currentTime) + lenSec + 3;
+        setTimeout(() => { try { blkGain.disconnect(); } catch (e) {} },
+                   Math.max(tail * 1000, 200));
       }
     });
   }
@@ -1877,24 +1932,74 @@
     }
   }
 
-  // Schedule the gain-automation curve as a sequence of linear ramps over one
-  // pattern, repeated `cycles` times starting at `startTime`. Sampled per step
-  // (plus the breakpoints themselves) so curves between sparse points are smooth.
-  function scheduleAutomation(startTime, cycles) {
+  // Schedule the gain-automation curve as linear ramps following the curve, for
+  // `cycles` patterns. Cycles are always phase-aligned to SEQ.playStart (the
+  // pattern origin) so the curve stays locked to the grid and the visual
+  // playhead no matter when (re)scheduling happens — e.g. editing mid-playback.
+  //
+  // Sampled at every step boundary AND every breakpoint, so sparse curves ramp
+  // smoothly and sharp points land exactly where drawn. `fromTime` is where we
+  // (re)take control of the param; everything before it is left untouched.
+  function scheduleAutomation(fromTime, cycles) {
     if (!autoGain) return;
     const g = autoGain.gain;
-    g.cancelScheduledValues(startTime);
-    const pts = autoPoints();
-    if (!pts.length) { g.setValueAtTime(1, startTime); return; }
     const cycleLen = SEQ.steps * stepDur();
-    g.setValueAtTime(Math.max(autoValueAt(0), 0.0001), startTime);
-    for (let c = 0; c < cycles; c++) {
-      const base = startTime + c * cycleLen;
-      for (let s = 1; s <= SEQ.steps; s++) {
-        const v = Math.max(autoValueAt(s), 0.0001);
-        g.linearRampToValueAtTime(v, base + s * stepDur());
-      }
+
+    // The master autoGain rides the BOARD TIMELINE curve only. Per-block curves
+    // are scheduled separately on each block's own gain node when it triggers.
+    const tl = SEQ.automation.gain;
+
+    // Anchor the param at its current value at fromTime so re-scheduling never
+    // snaps: cancel the future, then pin "now" before laying down new ramps.
+    g.cancelScheduledValues(fromTime);
+    const pts = autoPoints(tl);
+    if (!pts.length) { g.setValueAtTime(1, fromTime); return; }
+
+    // Build the list of (step, value) breakpoints to emit per cycle: the curve
+    // points plus the step-grid samples, deduped and sorted. Sampling the grid
+    // keeps multi-step linear segments faithful to the drawn straight lines.
+    const stepsSet = new Set();
+    pts.forEach((p) => stepsSet.add(p.step));
+    for (let s = 0; s <= SEQ.steps; s++) stepsSet.add(s);
+    const stepList = Array.from(stepsSet).sort((a, b) => a - b);
+
+    // Pin the value at fromTime to whatever the curve says it should be there,
+    // computed from the phase position within the current cycle.
+    const phase = ((fromTime - SEQ.playStart) % cycleLen + cycleLen) % cycleLen;
+    const curStep = phase / stepDur();
+    g.setValueAtTime(Math.max(autoValueAt(curStep, tl), 0.0001), fromTime);
+
+    // First cycle index whose origin is at or before fromTime.
+    let c0 = Math.floor((fromTime - SEQ.playStart) / cycleLen);
+    if (!isFinite(c0)) c0 = 0;
+    for (let c = c0; c < c0 + cycles; c++) {
+      const base = SEQ.playStart + c * cycleLen;
+      stepList.forEach((s) => {
+        const when = base + s * stepDur();
+        if (when <= fromTime) return;            // skip points already in the past
+        g.linearRampToValueAtTime(Math.max(autoValueAt(s, tl), 0.0001), when);
+      });
     }
+  }
+
+  // Schedule one placed block's own gain ride onto its dedicated `gainNode`,
+  // for a single play pass beginning at `when` (the block's trigger time). The
+  // block's curve is defined over pattern steps; the slice covering the block's
+  // own span [blockStep, blockStep+len] is mapped onto real time from `when`.
+  function scheduleBlockAutomation(gainNode, curve, blockStep, len, when) {
+    const g = gainNode.gain;
+    if (!curve || !curve.length) { g.setValueAtTime(1, when); return; }
+    const dur = stepDur();
+    g.setValueAtTime(Math.max(autoValueAt(blockStep, curve), 0.0001), when);
+    // Sample at each integer step inside the block plus every breakpoint within.
+    const samples = new Set();
+    for (let s = Math.ceil(blockStep); s <= blockStep + len; s++) samples.add(s);
+    curve.forEach((p) => { if (p.step > blockStep && p.step < blockStep + len) samples.add(p.step); });
+    Array.from(samples).sort((a, b) => a - b).forEach((s) => {
+      const t = when + (s - blockStep) * dur;
+      if (t <= when) return;
+      g.linearRampToValueAtTime(Math.max(autoValueAt(s, curve), 0.0001), t);
+    });
   }
 
   function seqPlay() {
@@ -2966,53 +3071,83 @@
         }
       });
 
-      // gain-automation lane (drawn when editing, or whenever points exist)
-      const autoPts = SEQ.automation.gain;
+      // gain-automation lane (drawn when editing, or whenever points exist).
+      // Target = the selected block's own curve, else the board timeline curve.
+      const editingBlock = autoEditingBlock();
+      const autoPts = autoTargetArr();
+      // Block curve uses the voice colour tint; timeline curve uses blue.
+      const blockNote = editingBlock ? SEQ.notes.get(state.editingKey) : null;
+      const accent = editingBlock ? '255,180,90' : '80,160,255';
+      const accentLine = editingBlock ? '255,200,130' : '120,190,255';
       if (AUTO.on || autoPts.length) {
         const lg = autoLaneGeom(canvas);
         // lane backdrop
-        g.fillStyle = AUTO.on ? 'rgba(80,160,255,0.10)' : 'rgba(80,160,255,0.05)';
+        g.fillStyle = AUTO.on ? 'rgba(' + accent + ',0.10)' : 'rgba(' + accent + ',0.05)';
         g.fillRect(lg.gut, lg.top, lg.plotW, AUTO.laneH);
-        g.strokeStyle = 'rgba(80,160,255,0.35)';
+        g.strokeStyle = 'rgba(' + accent + ',0.35)';
         g.lineWidth = 1;
         g.beginPath(); g.moveTo(lg.gut, lg.top); g.lineTo(W, lg.top); g.stroke();
+
+        // When editing a block, dim the lane outside the block's step span so
+        // it's clear the curve only affects the block while it's sounding.
+        if (editingBlock && blockNote) {
+          const bStep = parseInt(state.editingKey.slice(0, state.editingKey.indexOf(':')), 10);
+          const bLen = Math.min(Math.max(blockNote.len, 1), SEQ.steps - bStep);
+          const x0 = lg.xFromStep(bStep), x1 = lg.xFromStep(bStep + bLen);
+          g.fillStyle = 'rgba(0,0,0,0.35)';
+          g.fillRect(lg.gut, lg.top, x0 - lg.gut, AUTO.laneH);
+          g.fillRect(x1, lg.top, W - x1, AUTO.laneH);
+        }
+
         // unity (0 dB) reference line
-        const yUnity = lg.yFromVal(1);
-        g.strokeStyle = 'rgba(255,255,255,0.18)';
+        const yUnity = lg.yFromDb(0);
+        g.strokeStyle = 'rgba(255,255,255,0.22)';
         g.setLineDash([3, 3]);
         g.beginPath(); g.moveTo(lg.gut, yUnity); g.lineTo(W, yUnity); g.stroke();
         g.setLineDash([]);
-        g.fillStyle = 'rgba(120,180,255,0.6)';
+        g.fillStyle = 'rgba(' + accentLine + ',0.7)';
         g.font = "9px 'Suisse Intl Mono', monospace";
-        g.fillText('GAIN', lg.gut + 4, lg.top + 11);
+        g.fillText(editingBlock ? 'GAIN · ' + blockNote.voice + ' block' : 'GAIN · timeline',
+                   lg.gut + 4, lg.top + 11);
+        g.fillStyle = 'rgba(255,255,255,0.35)';
+        g.fillText('0dB', W - 28, yUnity - 3);
 
         if (autoPts.length) {
-          const sorted = autoPoints();
+          const sorted = autoPoints(autoPts);
           // filled curve under the line
           g.beginPath();
           g.moveTo(lg.xFromStep(sorted[0].step), lg.bottom);
-          g.lineTo(lg.xFromStep(sorted[0].step), lg.yFromVal(sorted[0].value));
-          sorted.forEach((p) => g.lineTo(lg.xFromStep(p.step), lg.yFromVal(p.value)));
+          g.lineTo(lg.xFromStep(sorted[0].step), lg.yFromDb(sorted[0].value));
+          sorted.forEach((p) => g.lineTo(lg.xFromStep(p.step), lg.yFromDb(p.value)));
           const last = sorted[sorted.length - 1];
           g.lineTo(lg.xFromStep(last.step), lg.bottom);
           g.closePath();
-          g.fillStyle = 'rgba(80,160,255,0.18)';
+          g.fillStyle = 'rgba(' + accent + ',0.18)';
           g.fill();
           // the curve line
           g.beginPath();
           sorted.forEach((p, i) => {
-            const x = lg.xFromStep(p.step), y = lg.yFromVal(p.value);
+            const x = lg.xFromStep(p.step), y = lg.yFromDb(p.value);
             i ? g.lineTo(x, y) : g.moveTo(x, y);
           });
-          g.strokeStyle = 'rgba(120,190,255,0.9)';
+          g.strokeStyle = 'rgba(' + accentLine + ',0.9)';
           g.lineWidth = 2; g.stroke();
           // breakpoint handles (bigger/brighter while editing)
           sorted.forEach((p) => {
-            const x = lg.xFromStep(p.step), y = lg.yFromVal(p.value);
+            const x = lg.xFromStep(p.step), y = lg.yFromDb(p.value);
             g.beginPath();
             g.arc(x, y, AUTO.on ? 4 : 2.5, 0, Math.PI * 2);
             g.fillStyle = '#bfe0ff'; g.fill();
           });
+          // live dB label on the point being dragged
+          if (AUTO.drag) {
+            const x = lg.xFromStep(AUTO.drag.step), y = lg.yFromDb(AUTO.drag.value);
+            const db = AUTO.drag.value;
+            const txt = db <= AUTO.dbFloor ? '−∞' : (db > 0 ? '+' : '') + db.toFixed(1) + 'dB';
+            g.fillStyle = '#ffffff';
+            g.font = "10px 'Suisse Intl Mono', monospace";
+            g.fillText(txt, Math.min(x + 6, W - 44), Math.max(y - 6, lg.top + 11));
+          }
         } else if (AUTO.on) {
           g.fillStyle = 'rgba(180,210,255,0.5)';
           g.fillText('click to add gain points · double-click to remove', lg.gut + 40, lg.top + 11);
@@ -3080,8 +3215,10 @@
     // sequencer transport
     $('btn-seq').addEventListener('click', toggleSeq);
     $('btn-clear').addEventListener('click', () => {
-      // In Auto mode, Clear wipes the automation lane; otherwise the notes.
-      if (AUTO.on) { SEQ.automation.gain.length = 0; }
+      // In Auto mode, Clear wipes the active automation curve — the selected
+      // block's curve if one is selected, else the timeline curve. Otherwise
+      // (note mode) it clears the notes.
+      if (AUTO.on) { autoTargetArr().length = 0; }
       else { SEQ.notes.clear(); state.editingKey = null; }
     });
     $('btn-auto').addEventListener('click', () => {
